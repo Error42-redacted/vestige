@@ -1591,9 +1591,7 @@ impl MemoryDreamer {
         let word_novelty = (novel_words as f64 / total_words as f64) * 0.5;
 
         // Boost novelty if connecting multiple sources
-        let source_bonus = ((source_memories.len() as f64 - 2.0) * 0.1)
-            .max(0.0)
-            .min(0.3);
+        let source_bonus = ((source_memories.len() as f64 - 2.0) * 0.1).clamp(0.0, 0.3);
 
         (word_novelty + source_bonus + 0.2).min(1.0)
     }

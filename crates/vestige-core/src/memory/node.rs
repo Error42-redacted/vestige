@@ -56,8 +56,8 @@ impl NodeType {
         }
     }
 
-    /// Parse from string
-    pub fn from_str(s: &str) -> Self {
+    /// Parse from string name
+    pub fn parse_name(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "fact" => NodeType::Fact,
             "concept" => NodeType::Concept,
@@ -215,7 +215,7 @@ impl KnowledgeNode {
 
     /// Get the parsed node type
     pub fn get_node_type(&self) -> NodeType {
-        NodeType::from_str(&self.node_type)
+        NodeType::parse_name(&self.node_type)
     }
 }
 
@@ -330,7 +330,7 @@ mod tests {
             NodeType::Event,
             NodeType::Code,
         ] {
-            assert_eq!(NodeType::from_str(node_type.as_str()), node_type);
+            assert_eq!(NodeType::parse_name(node_type.as_str()), node_type);
         }
     }
 

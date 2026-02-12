@@ -233,6 +233,10 @@ async fn execute_set(
         return Err("Description cannot be empty".to_string());
     }
 
+    if description.len() > 100_000 {
+        return Err("Description too large (max 100KB)".to_string());
+    }
+
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
 

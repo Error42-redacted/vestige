@@ -177,8 +177,8 @@ impl MemoryState {
         }
     }
 
-    /// Parse from string representation.
-    pub fn from_str(s: &str) -> Self {
+    /// Parse from string name.
+    pub fn parse_name(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "active" => MemoryState::Active,
             "dormant" => MemoryState::Dormant,
@@ -1373,7 +1373,7 @@ mod tests {
             MemoryState::Silent,
             MemoryState::Unavailable,
         ] {
-            assert_eq!(MemoryState::from_str(state.as_str()), state);
+            assert_eq!(MemoryState::parse_name(state.as_str()), state);
         }
     }
 

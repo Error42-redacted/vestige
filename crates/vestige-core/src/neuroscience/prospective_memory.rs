@@ -1232,7 +1232,7 @@ impl ProspectiveMemory {
             .collect();
 
         // Sort by effective priority (highest first)
-        result.sort_by(|a, b| b.effective_priority().cmp(&a.effective_priority()));
+        result.sort_by_key(|i| std::cmp::Reverse(i.effective_priority()));
 
         Ok(result)
     }
@@ -1301,7 +1301,7 @@ impl ProspectiveMemory {
         }
 
         // Sort triggered by effective priority
-        triggered.sort_by(|a, b| b.effective_priority().cmp(&a.effective_priority()));
+        triggered.sort_by_key(|i| std::cmp::Reverse(i.effective_priority()));
 
         Ok(triggered)
     }

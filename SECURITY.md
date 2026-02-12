@@ -4,7 +4,8 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.0.x   | :white_check_mark: |
+| 1.1.x   | :white_check_mark: |
+| 1.0.x   | :x:                |
 
 ## Reporting a Vulnerability
 
@@ -47,7 +48,15 @@ All data is stored locally in SQLite:
 | Linux | `~/.local/share/vestige/core/vestige.db` |
 | Windows | `%APPDATA%\vestige\core\vestige.db` |
 
-**Note**: Data is stored in plaintext. If you need encryption at rest, use OS-level encryption (FileVault, BitLocker, LUKS).
+**Default**: Data is stored in plaintext with owner-only file permissions (0600).
+
+### Encryption at Rest
+
+For database-level encryption, build with SQLCipher:
+```bash
+cargo build --no-default-features --features encryption,embeddings,vector-search
+```
+Set `VESTIGE_ENCRYPTION_KEY` environment variable. SQLCipher encrypts all database files including the WAL journal. Alternatively, use OS-level encryption (FileVault, BitLocker, LUKS).
 
 ### Input Validation
 

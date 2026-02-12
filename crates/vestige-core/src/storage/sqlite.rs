@@ -99,11 +99,26 @@ impl Storage {
 
                 let data_dir = proj_dirs.data_dir();
                 std::fs::create_dir_all(data_dir)?;
+                // Restrict directory permissions to owner-only on Unix
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let perms = std::fs::Permissions::from_mode(0o700);
+                    let _ = std::fs::set_permissions(data_dir, perms);
+                }
                 data_dir.join("vestige.db")
             }
         };
 
         let conn = Connection::open(&path)?;
+
+        // Restrict database file permissions to owner-only on Unix
+        #[cfg(unix)]
+        if path.exists() {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            let _ = std::fs::set_permissions(&path, perms);
+        }
 
         // Apply encryption key if SQLCipher is enabled and key is provided
         #[cfg(feature = "encryption")]

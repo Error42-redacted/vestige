@@ -546,8 +546,8 @@ impl MemoryCompressor {
 
         let common_tags: Vec<_> = tag_counts
             .iter()
-            .filter(|(_, &count)| count > memories.len() / 2)
-            .map(|(&tag, _)| tag)
+            .filter(|(_, count)| **count > memories.len() / 2)
+            .map(|(tag, _)| *tag)
             .take(3)
             .collect();
 

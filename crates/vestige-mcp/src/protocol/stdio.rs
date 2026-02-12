@@ -37,7 +37,7 @@ impl StdioTransport {
                 continue;
             }
 
-            debug!("Received: {}", line);
+            debug!("Received: {} bytes", line.len());
 
             // Parse JSON-RPC request
             let request: JsonRpcRequest = match serde_json::from_str(&line) {
@@ -66,7 +66,7 @@ impl StdioTransport {
             if let Some(response) = server.handle_request(request).await {
                 match serde_json::to_string(&response) {
                     Ok(response_json) => {
-                        debug!("Sending: {}", response_json);
+                        debug!("Sending: {} bytes", response_json.len());
                         writeln!(stdout, "{}", response_json)?;
                         stdout.flush()?;
                     }
