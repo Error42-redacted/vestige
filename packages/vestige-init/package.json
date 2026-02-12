@@ -1,0 +1,32 @@
+{
+  "name": "@vestige/init",
+  "version": "1.0.0",
+  "description": "Give your AI a brain in 10 seconds — zero-config Vestige installer",
+  "bin": {
+    "vestige-init": "bin/init.js"
+  },
+  "keywords": [
+    "vestige",
+    "mcp",
+    "ai",
+    "memory",
+    "claude",
+    "copilot",
+    "cursor",
+    "xcode",
+    "jetbrains",
+    "windsurf",
+    "init",
+    "installer"
+  ],
+  "author": "Sam Valladares",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samvallad33/vestige.git",
+    "directory": "packages/vestige-init"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
