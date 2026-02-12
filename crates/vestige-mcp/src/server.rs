@@ -176,6 +176,52 @@ impl McpServer {
                 description: Some("Demote a memory (thumbs down). Use when a memory led to a bad outcome or was wrong. Decreases retrieval strength so better alternatives surface. Does NOT delete.".to_string()),
                 input_schema: tools::feedback::demote_schema(),
             },
+            // ================================================================
+            // TEMPORAL TOOLS (v1.2+)
+            // ================================================================
+            ToolDescription {
+                name: "memory_timeline".to_string(),
+                description: Some("Browse memories chronologically. Returns memories in a time range, grouped by day. Defaults to last 7 days.".to_string()),
+                input_schema: tools::timeline::schema(),
+            },
+            ToolDescription {
+                name: "memory_changelog".to_string(),
+                description: Some("View audit trail of memory changes. Per-memory: state transitions. System-wide: consolidations + recent state changes.".to_string()),
+                input_schema: tools::changelog::schema(),
+            },
+            // ================================================================
+            // MAINTENANCE TOOLS (v1.2+)
+            // ================================================================
+            ToolDescription {
+                name: "health_check".to_string(),
+                description: Some("System health status with warnings and recommendations. Returns status (healthy/degraded/critical/empty), stats, and actionable advice.".to_string()),
+                input_schema: tools::maintenance::health_check_schema(),
+            },
+            ToolDescription {
+                name: "consolidate".to_string(),
+                description: Some("Run FSRS-6 memory consolidation cycle. Applies decay, generates embeddings, and performs maintenance. Use when memories seem stale.".to_string()),
+                input_schema: tools::maintenance::consolidate_schema(),
+            },
+            ToolDescription {
+                name: "stats".to_string(),
+                description: Some("Full memory system statistics including total count, retention distribution, embedding coverage, and cognitive state breakdown.".to_string()),
+                input_schema: tools::maintenance::stats_schema(),
+            },
+            ToolDescription {
+                name: "backup".to_string(),
+                description: Some("Create a SQLite database backup. Returns the backup file path.".to_string()),
+                input_schema: tools::maintenance::backup_schema(),
+            },
+            ToolDescription {
+                name: "export".to_string(),
+                description: Some("Export memories as JSON or JSONL. Supports tag and date filters.".to_string()),
+                input_schema: tools::maintenance::export_schema(),
+            },
+            ToolDescription {
+                name: "gc".to_string(),
+                description: Some("Garbage collect stale memories below retention threshold. Defaults to dry_run=true for safety.".to_string()),
+                input_schema: tools::maintenance::gc_schema(),
+            },
         ];
 
         let result = ListToolsResult { tools };
@@ -422,6 +468,22 @@ impl McpServer {
             "promote_memory" => tools::feedback::execute_promote(&self.storage, request.arguments).await,
             "demote_memory" => tools::feedback::execute_demote(&self.storage, request.arguments).await,
             "request_feedback" => tools::feedback::execute_request_feedback(&self.storage, request.arguments).await,
+
+            // ================================================================
+            // TEMPORAL TOOLS (v1.2+)
+            // ================================================================
+            "memory_timeline" => tools::timeline::execute(&self.storage, request.arguments).await,
+            "memory_changelog" => tools::changelog::execute(&self.storage, request.arguments).await,
+
+            // ================================================================
+            // MAINTENANCE TOOLS (v1.2+)
+            // ================================================================
+            "health_check" => tools::maintenance::execute_health_check(&self.storage, request.arguments).await,
+            "consolidate" => tools::maintenance::execute_consolidate(&self.storage, request.arguments).await,
+            "stats" => tools::maintenance::execute_stats(&self.storage, request.arguments).await,
+            "backup" => tools::maintenance::execute_backup(&self.storage, request.arguments).await,
+            "export" => tools::maintenance::execute_export(&self.storage, request.arguments).await,
+            "gc" => tools::maintenance::execute_gc(&self.storage, request.arguments).await,
 
             name => {
                 return Err(JsonRpcError::method_not_found_with_message(&format!(
@@ -726,8 +788,8 @@ mod tests {
         let result = response.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
 
-        // v1.1+: Only 8 tools are exposed (deprecated tools work internally but aren't listed)
-        assert_eq!(tools.len(), 8, "Expected exactly 8 tools in v1.1+");
+        // v1.2+: 16 tools (8 unified + 2 temporal + 6 maintenance)
+        assert_eq!(tools.len(), 16, "Expected exactly 16 tools in v1.2+");
 
         let tool_names: Vec<&str> = tools
             .iter()
@@ -747,6 +809,18 @@ mod tests {
         // Feedback tools
         assert!(tool_names.contains(&"promote_memory"));
         assert!(tool_names.contains(&"demote_memory"));
+
+        // Temporal tools (v1.2)
+        assert!(tool_names.contains(&"memory_timeline"));
+        assert!(tool_names.contains(&"memory_changelog"));
+
+        // Maintenance tools (v1.2)
+        assert!(tool_names.contains(&"health_check"));
+        assert!(tool_names.contains(&"consolidate"));
+        assert!(tool_names.contains(&"stats"));
+        assert!(tool_names.contains(&"backup"));
+        assert!(tool_names.contains(&"export"));
+        assert!(tool_names.contains(&"gc"));
     }
 
     #[tokio::test]

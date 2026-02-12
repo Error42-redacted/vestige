@@ -2278,6 +2278,42 @@ impl Storage {
         }
         Ok(result)
     }
+
+    /// Create a consistent backup using VACUUM INTO
+    pub fn backup_to(&self, path: &std::path::Path) -> Result<()> {
+        let path_str = path.to_str().ok_or_else(|| {
+            StorageError::Init("Invalid backup path encoding".to_string())
+        })?;
+        self.conn.execute_batch(&format!("VACUUM INTO '{}'", path_str.replace('\'', "''")))?;
+        Ok(())
+    }
+
+    /// Get recent state transitions across all memories (system-wide changelog)
+    pub fn get_recent_state_transitions(&self, limit: i32) -> Result<Vec<StateTransitionRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT * FROM state_transitions ORDER BY timestamp DESC LIMIT ?1"
+        )?;
+
+        let rows = stmt.query_map(params![limit], |row| {
+            Ok(StateTransitionRecord {
+                id: row.get("id")?,
+                memory_id: row.get("memory_id")?,
+                from_state: row.get("from_state")?,
+                to_state: row.get("to_state")?,
+                reason_type: row.get("reason_type")?,
+                reason_data: row.get("reason_data").ok().flatten(),
+                timestamp: DateTime::parse_from_rfc3339(&row.get::<_, String>("timestamp")?)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            })
+        })?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
 }
 
 // ============================================================================

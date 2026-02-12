@@ -40,6 +40,12 @@ pub fn schema() -> Value {
                 "default": 0.5,
                 "minimum": 0.0,
                 "maximum": 1.0
+            },
+            "detail_level": {
+                "type": "string",
+                "description": "Level of detail in results. 'brief' = id/type/tags/score only (saves tokens). 'summary' = default 8-field response. 'full' = all fields including FSRS state and timestamps.",
+                "enum": ["brief", "summary", "full"],
+                "default": "summary"
             }
         },
         "required": ["query"]
@@ -53,6 +59,8 @@ struct SearchArgs {
     limit: Option<i32>,
     min_retention: Option<f64>,
     min_similarity: Option<f32>,
+    #[serde(alias = "detail_level")]
+    detail_level: Option<String>,
 }
 
 /// Execute unified search
@@ -71,6 +79,19 @@ pub async fn execute(
     if args.query.trim().is_empty() {
         return Err("Query cannot be empty".to_string());
     }
+
+    // Validate detail_level
+    let detail_level = match args.detail_level.as_deref() {
+        Some("brief") => "brief",
+        Some("full") => "full",
+        Some("summary") | None => "summary",
+        Some(invalid) => {
+            return Err(format!(
+                "Invalid detail_level '{}'. Must be 'brief', 'summary', or 'full'.",
+                invalid
+            ));
+        }
+    };
 
     // Clamp all parameters to valid ranges
     let limit = args.limit.unwrap_or(10).clamp(1, 100);
@@ -97,10 +118,10 @@ pub async fn execute(
                 return false;
             }
             // Check similarity if semantic score is available
-            if let Some(sem_score) = r.semantic_score {
-                if sem_score < min_similarity {
-                    return false;
-                }
+            if let Some(sem_score) = r.semantic_score
+                && sem_score < min_similarity
+            {
+                return false;
             }
             true
         })
@@ -111,29 +132,112 @@ pub async fn execute(
     let ids: Vec<&str> = filtered_results.iter().map(|r| r.node.id.as_str()).collect();
     let _ = storage.strengthen_batch_on_access(&ids); // Ignore errors, don't fail search
 
-    // Format results
+    // Format results based on detail_level
     let formatted: Vec<Value> = filtered_results
         .iter()
-        .map(|r| {
-            serde_json::json!({
-                "id": r.node.id,
-                "content": r.node.content,
-                "combinedScore": r.combined_score,
-                "keywordScore": r.keyword_score,
-                "semanticScore": r.semantic_score,
-                "nodeType": r.node.node_type,
-                "tags": r.node.tags,
-                "retentionStrength": r.node.retention_strength,
-            })
-        })
+        .map(|r| format_search_result(r, detail_level))
         .collect();
 
     Ok(serde_json::json!({
         "query": args.query,
         "method": "hybrid",
+        "detailLevel": detail_level,
         "total": formatted.len(),
         "results": formatted,
     }))
+}
+
+/// Format a search result based on the requested detail level.
+fn format_search_result(r: &vestige_core::SearchResult, detail_level: &str) -> Value {
+    match detail_level {
+        "brief" => serde_json::json!({
+            "id": r.node.id,
+            "nodeType": r.node.node_type,
+            "tags": r.node.tags,
+            "retentionStrength": r.node.retention_strength,
+            "combinedScore": r.combined_score,
+        }),
+        "full" => serde_json::json!({
+            "id": r.node.id,
+            "content": r.node.content,
+            "combinedScore": r.combined_score,
+            "keywordScore": r.keyword_score,
+            "semanticScore": r.semantic_score,
+            "nodeType": r.node.node_type,
+            "tags": r.node.tags,
+            "retentionStrength": r.node.retention_strength,
+            "storageStrength": r.node.storage_strength,
+            "retrievalStrength": r.node.retrieval_strength,
+            "source": r.node.source,
+            "sentimentScore": r.node.sentiment_score,
+            "sentimentMagnitude": r.node.sentiment_magnitude,
+            "createdAt": r.node.created_at.to_rfc3339(),
+            "updatedAt": r.node.updated_at.to_rfc3339(),
+            "lastAccessed": r.node.last_accessed.to_rfc3339(),
+            "nextReview": r.node.next_review.map(|dt| dt.to_rfc3339()),
+            "stability": r.node.stability,
+            "difficulty": r.node.difficulty,
+            "reps": r.node.reps,
+            "lapses": r.node.lapses,
+            "validFrom": r.node.valid_from.map(|dt| dt.to_rfc3339()),
+            "validUntil": r.node.valid_until.map(|dt| dt.to_rfc3339()),
+            "matchType": format!("{:?}", r.match_type),
+        }),
+        // "summary" (default) — backwards compatible
+        _ => serde_json::json!({
+            "id": r.node.id,
+            "content": r.node.content,
+            "combinedScore": r.combined_score,
+            "keywordScore": r.keyword_score,
+            "semanticScore": r.semantic_score,
+            "nodeType": r.node.node_type,
+            "tags": r.node.tags,
+            "retentionStrength": r.node.retention_strength,
+        }),
+    }
+}
+
+/// Format a KnowledgeNode based on the requested detail level.
+/// Reusable across search, timeline, and other tools.
+pub fn format_node(node: &vestige_core::KnowledgeNode, detail_level: &str) -> Value {
+    match detail_level {
+        "brief" => serde_json::json!({
+            "id": node.id,
+            "nodeType": node.node_type,
+            "tags": node.tags,
+            "retentionStrength": node.retention_strength,
+        }),
+        "full" => serde_json::json!({
+            "id": node.id,
+            "content": node.content,
+            "nodeType": node.node_type,
+            "tags": node.tags,
+            "retentionStrength": node.retention_strength,
+            "storageStrength": node.storage_strength,
+            "retrievalStrength": node.retrieval_strength,
+            "source": node.source,
+            "sentimentScore": node.sentiment_score,
+            "sentimentMagnitude": node.sentiment_magnitude,
+            "createdAt": node.created_at.to_rfc3339(),
+            "updatedAt": node.updated_at.to_rfc3339(),
+            "lastAccessed": node.last_accessed.to_rfc3339(),
+            "nextReview": node.next_review.map(|dt| dt.to_rfc3339()),
+            "stability": node.stability,
+            "difficulty": node.difficulty,
+            "reps": node.reps,
+            "lapses": node.lapses,
+            "validFrom": node.valid_from.map(|dt| dt.to_rfc3339()),
+            "validUntil": node.valid_until.map(|dt| dt.to_rfc3339()),
+        }),
+        // "summary" (default)
+        _ => serde_json::json!({
+            "id": node.id,
+            "content": node.content,
+            "nodeType": node.node_type,
+            "tags": node.tags,
+            "retentionStrength": node.retention_strength,
+        }),
+    }
 }
 
 // ============================================================================
@@ -488,5 +592,114 @@ mod tests {
         assert_eq!(similarity_schema["minimum"], 0.0);
         assert_eq!(similarity_schema["maximum"], 1.0);
         assert_eq!(similarity_schema["default"], 0.5);
+    }
+
+    // ========================================================================
+    // DETAIL LEVEL TESTS
+    // ========================================================================
+
+    #[test]
+    fn test_schema_has_detail_level() {
+        let schema_value = schema();
+        let dl = &schema_value["properties"]["detail_level"];
+        assert!(dl.is_object());
+        assert_eq!(dl["default"], "summary");
+        let enum_values = dl["enum"].as_array().unwrap();
+        assert!(enum_values.contains(&serde_json::json!("brief")));
+        assert!(enum_values.contains(&serde_json::json!("summary")));
+        assert!(enum_values.contains(&serde_json::json!("full")));
+    }
+
+    #[tokio::test]
+    async fn test_search_detail_level_brief_excludes_content() {
+        let (storage, _dir) = test_storage().await;
+        ingest_test_content(&storage, "Brief mode test content for search.").await;
+
+        let args = serde_json::json!({
+            "query": "brief",
+            "detail_level": "brief",
+            "min_similarity": 0.0
+        });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_ok());
+
+        let value = result.unwrap();
+        assert_eq!(value["detailLevel"], "brief");
+        let results = value["results"].as_array().unwrap();
+        if !results.is_empty() {
+            let first = &results[0];
+            // Brief should NOT have content
+            assert!(first.get("content").is_none() || first["content"].is_null());
+            // Brief should have these fields
+            assert!(first["id"].is_string());
+            assert!(first["nodeType"].is_string());
+            assert!(first["tags"].is_array());
+            assert!(first["retentionStrength"].is_number());
+            assert!(first["combinedScore"].is_number());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_search_detail_level_full_includes_timestamps() {
+        let (storage, _dir) = test_storage().await;
+        ingest_test_content(&storage, "Full mode test content for search.").await;
+
+        let args = serde_json::json!({
+            "query": "full",
+            "detail_level": "full",
+            "min_similarity": 0.0
+        });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_ok());
+
+        let value = result.unwrap();
+        assert_eq!(value["detailLevel"], "full");
+        let results = value["results"].as_array().unwrap();
+        if !results.is_empty() {
+            let first = &results[0];
+            // Full should have timestamps
+            assert!(first["createdAt"].is_string());
+            assert!(first["updatedAt"].is_string());
+            assert!(first["content"].is_string());
+            assert!(first["storageStrength"].is_number());
+            assert!(first["retrievalStrength"].is_number());
+            assert!(first["matchType"].is_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_search_detail_level_default_is_summary() {
+        let (storage, _dir) = test_storage().await;
+        ingest_test_content(&storage, "Default detail level test content.").await;
+
+        let args = serde_json::json!({
+            "query": "default",
+            "min_similarity": 0.0
+        });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_ok());
+
+        let value = result.unwrap();
+        assert_eq!(value["detailLevel"], "summary");
+        let results = value["results"].as_array().unwrap();
+        if !results.is_empty() {
+            let first = &results[0];
+            // Summary should have content but not timestamps
+            assert!(first["content"].is_string());
+            assert!(first["id"].is_string());
+            assert!(first.get("createdAt").is_none() || first["createdAt"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_search_detail_level_invalid_fails() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({
+            "query": "test",
+            "detail_level": "invalid_level"
+        });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid detail_level"));
     }
 }

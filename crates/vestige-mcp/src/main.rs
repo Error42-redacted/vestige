@@ -208,6 +208,20 @@ async fn main() {
         });
     }
 
+    // Spawn dashboard HTTP server alongside MCP server
+    {
+        let dashboard_port = std::env::var("VESTIGE_DASHBOARD_PORT")
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(3927);
+        let dashboard_storage = Arc::clone(&storage);
+        tokio::spawn(async move {
+            if let Err(e) = vestige_mcp::dashboard::start_background(dashboard_storage, dashboard_port).await {
+                warn!("Dashboard failed to start: {}", e);
+            }
+        });
+    }
+
     // Create MCP server
     let server = McpServer::new(storage);
 

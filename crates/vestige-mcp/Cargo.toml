@@ -1,6 +1,6 @@
 [package]
 name = "vestige-mcp"
-version = "1.1.3"
+version = "1.2.0"
 edition = "2024"
 description = "Cognitive memory MCP server for Claude - FSRS-6, spreading activation, synaptic tagging, and 130 years of memory research"
 authors = ["samvallad33"]
@@ -70,6 +70,12 @@ colored = "3"
 
 # SQLite (for backup WAL checkpoint)
 rusqlite = { version = "0.38", features = ["bundled"] }
+
+# Dashboard (v1.2) - hyper/tower already in Cargo.lock via rmcp/reqwest
+axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio", "http1"] }
+tower = { version = "0.5", features = ["limit"] }
+tower-http = { version = "0.6", features = ["cors", "set-header"] }
+open = "5"
 
 [dev-dependencies]
 tempfile = "3"

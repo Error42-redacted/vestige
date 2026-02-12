@@ -14,6 +14,13 @@ pub mod memory_unified;
 pub mod search_unified;
 pub mod smart_ingest;
 
+// v1.2: Temporal query tools
+pub mod changelog;
+pub mod timeline;
+
+// v1.2: Maintenance tools
+pub mod maintenance;
+
 // Deprecated tools - kept for internal backwards compatibility
 // These modules are intentionally unused in the public API
 #[allow(dead_code)]

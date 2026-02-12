@@ -84,6 +84,16 @@ enum Commands {
         #[arg(long)]
         yes: bool,
     },
+
+    /// Launch the memory web dashboard
+    Dashboard {
+        /// Port to bind the dashboard server to
+        #[arg(long, default_value = "3927")]
+        port: u16,
+        /// Don't automatically open the browser
+        #[arg(long)]
+        no_open: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -107,6 +117,7 @@ fn main() -> anyhow::Result<()> {
             dry_run,
             yes,
         } => run_gc(min_retention, max_age_days, dry_run, yes),
+        Commands::Dashboard { port, no_open } => run_dashboard(port, !no_open),
     }
 }
 
@@ -829,6 +840,36 @@ fn run_gc(
     );
 
     Ok(())
+}
+
+/// Run the dashboard web server
+fn run_dashboard(port: u16, open_browser: bool) -> anyhow::Result<()> {
+    println!("{}", "=== Vestige Dashboard ===".cyan().bold());
+    println!();
+    println!("Starting dashboard at {}...", format!("http://127.0.0.1:{}", port).cyan());
+
+    let mut storage = Storage::new(None)?;
+
+    // Try to initialize embeddings for search support
+    #[cfg(feature = "embeddings")]
+    {
+        if let Err(e) = storage.init_embeddings() {
+            println!(
+                "  {} Embeddings unavailable: {} (search will use keyword-only)",
+                "!".yellow(),
+                e
+            );
+        }
+    }
+
+    let storage = std::sync::Arc::new(tokio::sync::Mutex::new(storage));
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        vestige_mcp::dashboard::start_dashboard(storage, port, open_browser)
+            .await
+            .map_err(|e| anyhow::anyhow!("Dashboard error: {}", e))
+    })
 }
 
 /// Truncate a string for display (UTF-8 safe)
