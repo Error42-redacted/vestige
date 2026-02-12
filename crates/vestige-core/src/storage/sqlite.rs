@@ -478,7 +478,7 @@ impl Storage {
 
     /// Get the embedding vector for a node
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
-    fn get_node_embedding(&self, node_id: &str) -> Result<Option<Vec<f32>>> {
+    pub fn get_node_embedding(&self, node_id: &str) -> Result<Option<Vec<f32>>> {
         let mut stmt = self.conn.prepare(
             "SELECT embedding FROM node_embeddings WHERE node_id = ?1"
         )?;
@@ -490,6 +490,29 @@ impl Storage {
         Ok(embedding_bytes.and_then(|bytes| {
             crate::embeddings::Embedding::from_bytes(&bytes).map(|e| e.vector)
         }))
+    }
+
+    /// Get all embedding vectors for duplicate detection
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    pub fn get_all_embeddings(&self) -> Result<Vec<(String, Vec<f32>)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT node_id, embedding FROM node_embeddings")?;
+
+        let results: Vec<(String, Vec<f32>)> = stmt
+            .query_map([], |row| {
+                let node_id: String = row.get(0)?;
+                let embedding_bytes: Vec<u8> = row.get(1)?;
+                Ok((node_id, embedding_bytes))
+            })?
+            .filter_map(|r| r.ok())
+            .filter_map(|(id, bytes)| {
+                crate::embeddings::Embedding::from_bytes(&bytes)
+                    .map(|e| (id, e.vector))
+            })
+            .collect();
+
+        Ok(results)
     }
 
     /// Update the content of an existing node

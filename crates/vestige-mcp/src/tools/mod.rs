@@ -21,6 +21,11 @@ pub mod timeline;
 // v1.2: Maintenance tools
 pub mod maintenance;
 
+// v1.3: Auto-save and dedup tools
+pub mod checkpoint;
+pub mod dedup;
+pub mod importance;
+
 // Deprecated tools - kept for internal backwards compatibility
 // These modules are intentionally unused in the public API
 #[allow(dead_code)]

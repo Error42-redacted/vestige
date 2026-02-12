@@ -222,6 +222,24 @@ impl McpServer {
                 description: Some("Garbage collect stale memories below retention threshold. Defaults to dry_run=true for safety.".to_string()),
                 input_schema: tools::maintenance::gc_schema(),
             },
+            // ================================================================
+            // AUTO-SAVE & DEDUP TOOLS (v1.3+)
+            // ================================================================
+            ToolDescription {
+                name: "importance_score".to_string(),
+                description: Some("Score content importance using 4-channel neuroscience model (novelty/arousal/reward/attention). Returns composite score, channel breakdown, encoding boost, and explanations.".to_string()),
+                input_schema: tools::importance::schema(),
+            },
+            ToolDescription {
+                name: "session_checkpoint".to_string(),
+                description: Some("Batch save up to 20 items in one call. Each item routes through Prediction Error Gating (smart_ingest). Use at session end or before context compaction to save all unsaved work.".to_string()),
+                input_schema: tools::checkpoint::schema(),
+            },
+            ToolDescription {
+                name: "find_duplicates".to_string(),
+                description: Some("Find duplicate and near-duplicate memory clusters using cosine similarity on embeddings. Returns clusters with suggested actions (merge/review). Use to clean up redundant memories.".to_string()),
+                input_schema: tools::dedup::schema(),
+            },
         ];
 
         let result = ListToolsResult { tools };
@@ -484,6 +502,13 @@ impl McpServer {
             "backup" => tools::maintenance::execute_backup(&self.storage, request.arguments).await,
             "export" => tools::maintenance::execute_export(&self.storage, request.arguments).await,
             "gc" => tools::maintenance::execute_gc(&self.storage, request.arguments).await,
+
+            // ================================================================
+            // AUTO-SAVE & DEDUP TOOLS (v1.3+)
+            // ================================================================
+            "importance_score" => tools::importance::execute(&self.storage, request.arguments).await,
+            "session_checkpoint" => tools::checkpoint::execute(&self.storage, request.arguments).await,
+            "find_duplicates" => tools::dedup::execute(&self.storage, request.arguments).await,
 
             name => {
                 return Err(JsonRpcError::method_not_found_with_message(&format!(
@@ -788,8 +813,8 @@ mod tests {
         let result = response.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
 
-        // v1.2+: 16 tools (8 unified + 2 temporal + 6 maintenance)
-        assert_eq!(tools.len(), 16, "Expected exactly 16 tools in v1.2+");
+        // v1.3+: 19 tools (8 unified + 2 temporal + 6 maintenance + 3 auto-save/dedup)
+        assert_eq!(tools.len(), 19, "Expected exactly 19 tools in v1.3+");
 
         let tool_names: Vec<&str> = tools
             .iter()
@@ -821,6 +846,11 @@ mod tests {
         assert!(tool_names.contains(&"backup"));
         assert!(tool_names.contains(&"export"));
         assert!(tool_names.contains(&"gc"));
+
+        // Auto-save & dedup tools (v1.3)
+        assert!(tool_names.contains(&"importance_score"));
+        assert!(tool_names.contains(&"session_checkpoint"));
+        assert!(tool_names.contains(&"find_duplicates"));
     }
 
     #[tokio::test]
