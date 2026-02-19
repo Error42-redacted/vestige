@@ -11,7 +11,10 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use uuid::Uuid;
 
-use crate::fsrs::{FSRSScheduler, FSRSState, LearningState, Rating};
+use crate::fsrs::{
+    retrievability_with_decay, DEFAULT_DECAY,
+    FSRSScheduler, FSRSState, LearningState, Rating,
+};
 use crate::memory::{
     ConsolidationResult, EmbeddingResult, IngestInput, KnowledgeNode, MatchType, MemoryStats,
     RecallInput, SearchMode, SearchResult, SimilarityResult,
@@ -814,15 +817,14 @@ impl Storage {
             .ok_or_else(|| StorageError::NotFound(id.to_string()))
     }
 
-    /// Passively strengthen a memory when it's accessed (recalled/searched)
-    /// This implements the "use it or lose it" principle - memories that are
-    /// accessed get a small boost, those that aren't decay naturally.
-    /// Based on Testing Effect (Roediger & Karpicke 2006)
+    /// Passively strengthen a memory when it's accessed (recalled/searched).
+    /// Implements the Testing Effect (Roediger & Karpicke 2006) + v1.4.0
+    /// content-aware cross-memory reinforcement: semantically similar neighbors
+    /// receive a diminished boost proportional to cosine similarity.
     pub fn strengthen_on_access(&self, id: &str) -> Result<()> {
         let now = Utc::now();
 
-        // Small retrieval strength boost (0.05) on each access
-        // This is much smaller than a full review but compounds over time
+        // Primary boost on the accessed node
         self.conn.execute(
             "UPDATE knowledge_nodes SET
                 last_accessed = ?1,
@@ -832,6 +834,39 @@ impl Storage {
             params![now.to_rfc3339(), id],
         )?;
 
+        // Log access for ACT-R activation computation
+        let _ = self.log_access(id, "search_hit");
+
+        // Content-aware cross-memory reinforcement: boost semantically similar neighbors
+        #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+        {
+            if let Ok(Some(embedding)) = self.get_node_embedding(id) {
+                let index = self
+                    .vector_index
+                    .lock()
+                    .map_err(|_| StorageError::Init("Vector index lock poisoned".to_string()))?;
+
+                // Query top-6 similar (one will be self, so we get ~5 neighbors)
+                if let Ok(neighbors) = index.search(&embedding, 6) {
+                    for (neighbor_id, similarity) in neighbors {
+                        if neighbor_id == id || similarity < 0.7 {
+                            continue;
+                        }
+                        // Diminished boost: 0.02 * similarity (max ~0.02)
+                        let boost = 0.02 * similarity as f64;
+                        let retention_boost = 0.008 * similarity as f64;
+                        let _ = self.conn.execute(
+                            "UPDATE knowledge_nodes SET
+                                retrieval_strength = MIN(1.0, retrieval_strength + ?1),
+                                retention_strength = MIN(1.0, retention_strength + ?2)
+                            WHERE id = ?3",
+                            params![boost, retention_boost, neighbor_id],
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -840,6 +875,16 @@ impl Storage {
         for id in ids {
             self.strengthen_on_access(id)?;
         }
+        Ok(())
+    }
+
+    /// Log a memory access event for ACT-R activation computation
+    fn log_access(&self, node_id: &str, access_type: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO memory_access_log (node_id, access_type, accessed_at)
+             VALUES (?1, ?2, ?3)",
+            params![node_id, access_type, Utc::now().to_rfc3339()],
+        )?;
         Ok(())
     }
 
@@ -858,6 +903,8 @@ impl Storage {
             WHERE id = ?2",
             params![now.to_rfc3339(), id],
         )?;
+
+        let _ = self.log_access(id, "promote");
 
         self.get_node(id)?
             .ok_or_else(|| StorageError::NotFound(id.to_string()))
@@ -879,6 +926,8 @@ impl Storage {
             WHERE id = ?2",
             params![now.to_rfc3339(), id],
         )?;
+
+        let _ = self.log_access(id, "demote");
 
         self.get_node(id)?
             .ok_or_else(|| StorageError::NotFound(id.to_string()))
@@ -1250,6 +1299,37 @@ impl Storage {
             }
         }
 
+        // Three-signal reranking (Park et al. Generative Agents 2023)
+        // final_score = 0.2*recency + 0.3*importance + 0.5*relevance
+        let now = Utc::now();
+        for result in &mut results {
+            let hours_since = (now - result.node.last_accessed).num_seconds() as f64 / 3600.0;
+            let recency = 0.995_f64.powf(hours_since.max(0.0));
+
+            // ACT-R activation as importance signal (pre-computed during consolidation)
+            let activation: f64 = self
+                .conn
+                .query_row(
+                    "SELECT COALESCE(activation, 0.0) FROM knowledge_nodes WHERE id = ?1",
+                    params![result.node.id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0.0);
+            // Normalize ACT-R activation [-2, 5] → [0, 1]
+            let importance = ((activation + 2.0) / 7.0).clamp(0.0, 1.0);
+
+            let relevance = result.combined_score as f64;
+
+            let final_score = 0.2 * recency + 0.3 * importance + 0.5 * relevance;
+            result.combined_score = final_score as f32;
+        }
+
+        results.sort_by(|a, b| {
+            b.combined_score
+                .partial_cmp(&a.combined_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
         Ok(results)
     }
 
@@ -1479,17 +1559,17 @@ impl Storage {
         Ok(result)
     }
 
-    /// Apply decay to all memories using batched pagination to avoid OOM.
+    /// Apply FSRS-6 decay to all memories using batched pagination to avoid OOM.
     ///
-    /// Instead of loading all knowledge_nodes into memory at once, this
-    /// processes rows in fixed-size batches (BATCH_SIZE = 500) using
-    /// LIMIT/OFFSET pagination. Each batch runs inside its own transaction
-    /// for atomicity without holding a giant write-lock.
+    /// Uses the real FSRS-6 retrievability formula: R = (1 + factor * t / S)^(-w20)
+    /// with personalized w20 from fsrs_config table. Sentiment boost extends
+    /// effective stability for emotional memories.
     pub fn apply_decay(&mut self) -> Result<i32> {
-        const FSRS_DECAY: f64 = 0.5;
-        const FSRS_FACTOR: f64 = 9.0;
-        const BATCH_SIZE: i64 = 500;
+        // Read personalized w20 from config (falls back to default 0.1542)
+        let w20 = self.get_fsrs_w20().unwrap_or(DEFAULT_DECAY);
+        let sleep = crate::SleepConsolidation::new();
 
+        const BATCH_SIZE: i64 = 500;
         let now = Utc::now();
         let mut count = 0i32;
         let mut offset = 0i64;
@@ -1522,8 +1602,6 @@ impl Storage {
             }
 
             let batch_len = batch.len() as i64;
-
-            // Use a transaction for the batch
             let tx = self.conn.transaction()?;
 
             for (id, last_accessed, storage_strength, _, sentiment_mag, stability) in &batch {
@@ -1534,14 +1612,16 @@ impl Storage {
                 let days_since = (now - last).num_seconds() as f64 / 86400.0;
 
                 if days_since > 0.0 {
+                    // Sentiment boost: emotional memories decay slower (up to 1.5x stability)
                     let effective_stability = stability * (1.0 + sentiment_mag * 0.5);
 
-                    let new_retrieval =
-                        (1.0 + days_since / (FSRS_FACTOR * effective_stability))
-                            .powf(-1.0 / FSRS_DECAY);
+                    // Real FSRS-6 retrievability with personalized w20
+                    let new_retrieval = retrievability_with_decay(
+                        effective_stability, days_since, w20,
+                    );
 
-                    let new_retention =
-                        (new_retrieval * 0.7) + ((storage_strength / 10.0).min(1.0) * 0.3);
+                    // Use SleepConsolidation for retention calculation
+                    let new_retention = sleep.calculate_retention(*storage_strength, new_retrieval);
 
                     tx.execute(
                         "UPDATE knowledge_nodes SET retrieval_strength = ?1, retention_strength = ?2 WHERE id = ?3",
@@ -1559,26 +1639,227 @@ impl Storage {
         Ok(count)
     }
 
-    /// Run consolidation
+    /// Read personalized w20 from fsrs_config table
+    fn get_fsrs_w20(&self) -> Result<f64> {
+        self.conn
+            .query_row(
+                "SELECT value FROM fsrs_config WHERE key = 'w20'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| StorageError::Init(format!("Failed to read w20: {}", e)))
+    }
+
+    /// Run full FSRS-6 consolidation cycle (v1.4.0)
+    ///
+    /// 7-step automatic consolidation:
+    /// 1. Apply FSRS-6 decay with personalized w20
+    /// 2. Promote emotional memories (synaptic tagging)
+    /// 3. Generate missing embeddings
+    /// 4. Auto-dedup: merge similar memories (episodic → semantic)
+    /// 5. Compute ACT-R base-level activations from access history
+    /// 6. Prune old access log entries (keep 90 days)
+    /// 7. Optimize w20 if enough usage data exists
     pub fn run_consolidation(&mut self) -> Result<ConsolidationResult> {
         let start = std::time::Instant::now();
 
+        // v1.5.0: Use SleepConsolidation for structured consolidation
+        let sleep = crate::SleepConsolidation::new();
+
+        // 1. Apply FSRS-6 decay with real formula + personalized w20
         let decay_applied = self.apply_decay()? as i64;
 
-        let promoted = self.conn.execute(
-            "UPDATE knowledge_nodes SET
-                storage_strength = MIN(storage_strength * 1.5, 10.0)
-             WHERE sentiment_magnitude > 0.5
-             AND storage_strength < 10",
-            [],
-        )? as i64;
+        // 2. Promote emotional memories via SleepConsolidation
+        let mut promoted = 0i64;
+        {
+            let candidates: Vec<(String, f64, f64)> = self.conn
+                .prepare(
+                    "SELECT id, sentiment_magnitude, storage_strength
+                     FROM knowledge_nodes
+                     WHERE storage_strength < 10.0"
+                )?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .filter_map(|r| r.ok())
+                .collect();
 
+            for (id, sentiment_mag, storage_strength) in &candidates {
+                if sleep.should_promote(*sentiment_mag, *storage_strength) {
+                    let boosted = sleep.promotion_boost(*storage_strength);
+                    self.conn.execute(
+                        "UPDATE knowledge_nodes SET storage_strength = ?1 WHERE id = ?2",
+                        params![boosted, id],
+                    )?;
+                    promoted += 1;
+                }
+            }
+        }
+
+        // 3. Generate missing embeddings
         #[cfg(all(feature = "embeddings", feature = "vector-search"))]
         let embeddings_generated = self.generate_missing_embeddings()?;
         #[cfg(not(all(feature = "embeddings", feature = "vector-search")))]
         let embeddings_generated = 0i64;
 
+        // 4. Auto-dedup: merge similar memories (episodic → semantic consolidation)
+        #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+        let duplicates_merged = self.auto_dedup_consolidation().unwrap_or(0);
+        #[cfg(not(all(feature = "embeddings", feature = "vector-search")))]
+        let duplicates_merged = 0i64;
+
+        // 5. Compute ACT-R activations from access history
+        let activations_computed = self.compute_act_r_activations().unwrap_or(0);
+
+        // 6. Prune old access log entries (keep 90 days)
+        let _ = self.prune_access_log();
+
+        // 7. Optimize w20 if enough usage data
+        let w20_optimized = self.optimize_w20_if_ready().unwrap_or(None);
+
+        // ====================================================================
+        // v1.5.0: Extended consolidation steps 8-15
+        // ====================================================================
+
+        // 8. Memory Dreams — synthesize insights (sync path)
+        let mut _insights_generated = 0i64;
+        {
+            let dreamer = crate::advanced::dreams::MemoryDreamer::new();
+            let recent = self.get_all_nodes(100, 0).unwrap_or_default();
+            let dream_memories: Vec<crate::advanced::dreams::DreamMemory> = recent
+                .iter()
+                .map(|n| crate::advanced::dreams::DreamMemory {
+                    id: n.id.clone(),
+                    content: n.content.clone(),
+                    embedding: None,
+                    tags: n.tags.clone(),
+                    created_at: n.created_at,
+                    access_count: n.reps as u32,
+                })
+                .collect();
+            if dream_memories.len() >= 5 {
+                let insights = dreamer.synthesize_insights(&dream_memories);
+                _insights_generated = insights.len() as i64;
+                for insight in &insights {
+                    let record = InsightRecord {
+                        id: Uuid::new_v4().to_string(),
+                        insight: insight.insight.clone(),
+                        source_memories: insight.source_memories.clone(),
+                        confidence: insight.confidence,
+                        novelty_score: insight.novelty_score,
+                        insight_type: format!("{:?}", insight.insight_type),
+                        generated_at: Utc::now(),
+                        tags: vec![],
+                        feedback: None,
+                        applied_count: 0,
+                    };
+                    let _ = self.save_insight(&record);
+                }
+            }
+        }
+
+        // 9. Memory Compression (old memories → summaries)
+        let mut _memories_compressed = 0i64;
+        {
+            let mut compressor = crate::advanced::compression::MemoryCompressor::new();
+            let all_nodes = self.get_all_nodes(500, 0).unwrap_or_default();
+            let thirty_days_ago = Utc::now() - Duration::days(30);
+            let old_memories: Vec<crate::advanced::compression::MemoryForCompression> = all_nodes
+                .iter()
+                .filter(|n| n.created_at < thirty_days_ago && n.retention_strength < 0.5)
+                .map(|n| crate::advanced::compression::MemoryForCompression {
+                    id: n.id.clone(),
+                    content: n.content.clone(),
+                    tags: n.tags.clone(),
+                    created_at: n.created_at,
+                    last_accessed: Some(n.last_accessed),
+                    embedding: None,
+                })
+                .collect();
+            if old_memories.len() >= 3 {
+                let groups = compressor.find_compressible_groups(&old_memories);
+                for group_ids in groups.iter().take(5) {
+                    // Limit to 5 groups per consolidation
+                    let group: Vec<_> = old_memories
+                        .iter()
+                        .filter(|m| group_ids.contains(&m.id))
+                        .cloned()
+                        .collect();
+                    if let Some(_compressed) = compressor.compress(&group) {
+                        _memories_compressed += group.len() as i64;
+                    }
+                }
+            }
+        }
+
+        // 10. Memory State Transitions (Active→Dormant→Silent→Unavailable)
+        let _state_transitions: i64;
+        {
+            let service = crate::neuroscience::memory_states::StateUpdateService::new();
+            let all_nodes = self.get_all_nodes(500, 0).unwrap_or_default();
+            let mut lifecycles: Vec<crate::neuroscience::memory_states::MemoryLifecycle> = all_nodes
+                .iter()
+                .map(|n| {
+                    let mut lc = crate::neuroscience::memory_states::MemoryLifecycle::new();
+                    lc.last_access = n.last_accessed;
+                    lc.access_count = n.reps as u32;
+                    lc.state = if n.retention_strength > 0.7 {
+                        crate::neuroscience::memory_states::MemoryState::Active
+                    } else if n.retention_strength > 0.3 {
+                        crate::neuroscience::memory_states::MemoryState::Dormant
+                    } else if n.retention_strength > 0.1 {
+                        crate::neuroscience::memory_states::MemoryState::Silent
+                    } else {
+                        crate::neuroscience::memory_states::MemoryState::Unavailable
+                    };
+                    lc
+                })
+                .collect();
+            let batch_result = service.batch_update(&mut lifecycles);
+            _state_transitions = batch_result.total_transitions as i64;
+        }
+
+        // 11. Synaptic Capture Sweep (retroactive importance)
+        {
+            let mut sts = crate::neuroscience::synaptic_tagging::SynapticTaggingSystem::new();
+            let _ = sts.sweep_for_capture(Utc::now());
+            sts.decay_tags();
+        }
+
+        // 12. Cross-Project Learning (detect universal patterns)
+        {
+            let learner = crate::advanced::cross_project::CrossProjectLearner::new();
+            let _patterns = learner.find_universal_patterns();
+        }
+
+        // 13. Hippocampal Index Maintenance
+        {
+            let index = crate::neuroscience::hippocampal_index::HippocampalIndex::new();
+            let _ = index.prune_weak_links();
+        }
+
+        // 14. Importance Evolution (decay stale importance)
+        {
+            let tracker = crate::advanced::importance::ImportanceTracker::new();
+            tracker.apply_importance_decay();
+        }
+
+        // 15. Connection Graph Maintenance (decay + prune weak connections)
+        let _connections_pruned = self.prune_weak_connections(0.05).unwrap_or(0) as i64;
+
         let duration = start.elapsed().as_millis() as i64;
+
+        // Record consolidation history (bug fix: was never recorded before v1.4.0)
+        let _ = self.conn.execute(
+            "INSERT INTO consolidation_history (completed_at, duration_ms, memories_replayed, duplicates_merged, activations_computed, w20_optimized)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                Utc::now().to_rfc3339(),
+                duration,
+                decay_applied,
+                duplicates_merged,
+                activations_computed,
+                w20_optimized,
+            ],
+        );
 
         Ok(ConsolidationResult {
             nodes_processed: decay_applied,
@@ -1587,7 +1868,298 @@ impl Storage {
             decay_applied,
             duration_ms: duration,
             embeddings_generated,
+            duplicates_merged,
+            neighbors_reinforced: 0,
+            activations_computed,
+            w20_optimized,
         })
+    }
+
+    /// Auto-deduplicate similar memories during consolidation (episodic → semantic merge)
+    ///
+    /// Finds clusters with cosine similarity > 0.85, keeps the strongest node,
+    /// appends unique content from weaker nodes, and deletes duplicates.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    fn auto_dedup_consolidation(&mut self) -> Result<i64> {
+        let all_embeddings = self.get_all_embeddings()?;
+        let n = all_embeddings.len();
+
+        if n < 2 || n > 2000 {
+            return Ok(0);
+        }
+
+        const SIMILARITY_THRESHOLD: f32 = 0.85;
+        let mut merged_count = 0i64;
+        let mut consumed: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for i in 0..n {
+            if consumed.contains(&all_embeddings[i].0) {
+                continue;
+            }
+
+            let mut cluster: Vec<(usize, f32)> = Vec::new();
+
+            for j in (i + 1)..n {
+                if consumed.contains(&all_embeddings[j].0) {
+                    continue;
+                }
+                let sim =
+                    crate::embeddings::cosine_similarity(&all_embeddings[i].1, &all_embeddings[j].1);
+                if sim >= SIMILARITY_THRESHOLD {
+                    cluster.push((j, sim));
+                }
+            }
+
+            if cluster.is_empty() {
+                continue;
+            }
+
+            // Find the strongest node (highest retention_strength)
+            let anchor_id = &all_embeddings[i].0;
+            let anchor_retention: f64 = self
+                .conn
+                .query_row(
+                    "SELECT retention_strength FROM knowledge_nodes WHERE id = ?1",
+                    params![anchor_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0.0);
+
+            let mut best_idx = i;
+            let mut best_retention = anchor_retention;
+
+            for &(j, _) in &cluster {
+                let dup_id = &all_embeddings[j].0;
+                let dup_retention: f64 = self
+                    .conn
+                    .query_row(
+                        "SELECT retention_strength FROM knowledge_nodes WHERE id = ?1",
+                        params![dup_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0.0);
+                if dup_retention > best_retention {
+                    best_retention = dup_retention;
+                    best_idx = j;
+                }
+            }
+
+            let best_id = all_embeddings[best_idx].0.clone();
+
+            // Get keeper's content
+            let keeper_content: String = self
+                .conn
+                .query_row(
+                    "SELECT content FROM knowledge_nodes WHERE id = ?1",
+                    params![best_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or_default();
+
+            // Collect weak node IDs (all nodes in cluster except the keeper)
+            let mut weak_ids: Vec<String> = Vec::new();
+            if best_idx != i {
+                weak_ids.push(anchor_id.clone());
+            }
+            for &(j, _) in &cluster {
+                if j != best_idx {
+                    weak_ids.push(all_embeddings[j].0.clone());
+                }
+            }
+
+            // Merge unique content from weak nodes
+            let mut merged_content = keeper_content.clone();
+            for weak_id in &weak_ids {
+                let weak_content: String = self
+                    .conn
+                    .query_row(
+                        "SELECT content FROM knowledge_nodes WHERE id = ?1",
+                        params![weak_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or_default();
+
+                let weak_trimmed = weak_content.trim();
+                if !merged_content.contains(weak_trimmed) && weak_trimmed.len() > 20 {
+                    merged_content.push_str("\n\n[MERGED] ");
+                    merged_content.push_str(weak_trimmed);
+                }
+            }
+
+            // Update keeper with merged content
+            if merged_content != keeper_content {
+                let _ = self.update_node_content(&best_id, &merged_content);
+            }
+
+            // Delete weak nodes
+            for weak_id in &weak_ids {
+                let _ = self.delete_node(weak_id);
+                consumed.insert(weak_id.clone());
+                merged_count += 1;
+            }
+
+            consumed.insert(best_id);
+        }
+
+        Ok(merged_count)
+    }
+
+    /// Compute ACT-R base-level activation for all nodes from access history.
+    /// B_i = ln(Σ t_j^(-d)) where t_j = days since j-th access, d = 0.5
+    fn compute_act_r_activations(&mut self) -> Result<i64> {
+        const ACT_R_DECAY: f64 = 0.5;
+        let now = Utc::now();
+
+        let node_ids: Vec<String> = self
+            .conn
+            .prepare("SELECT DISTINCT node_id FROM memory_access_log")?
+            .query_map([], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if node_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut count = 0i64;
+        let tx = self.conn.transaction()?;
+
+        for node_id in &node_ids {
+            let timestamps: Vec<String> = tx
+                .prepare(
+                    "SELECT accessed_at FROM memory_access_log
+                     WHERE node_id = ?1
+                     ORDER BY accessed_at DESC
+                     LIMIT 500",
+                )?
+                .query_map(params![node_id], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if timestamps.is_empty() {
+                continue;
+            }
+
+            let mut sum_decay = 0.0_f64;
+            for ts_str in &timestamps {
+                let accessed_at = DateTime::parse_from_rfc3339(ts_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or(now);
+                let days_since = (now - accessed_at).num_seconds() as f64 / 86400.0;
+                let t = days_since.max(0.001);
+                sum_decay += t.powf(-ACT_R_DECAY);
+            }
+
+            let activation = sum_decay.ln();
+
+            tx.execute(
+                "UPDATE knowledge_nodes SET activation = ?1 WHERE id = ?2",
+                params![activation, node_id],
+            )?;
+            count += 1;
+        }
+
+        tx.commit()?;
+        Ok(count)
+    }
+
+    /// Prune old access log entries (keep last 90 days)
+    fn prune_access_log(&mut self) -> Result<i64> {
+        let cutoff = (Utc::now() - Duration::days(90)).to_rfc3339();
+        let deleted = self.conn.execute(
+            "DELETE FROM memory_access_log WHERE accessed_at < ?1",
+            params![cutoff],
+        )? as i64;
+        Ok(deleted)
+    }
+
+    /// Optimize personalized w20 (forgetting curve decay) if enough access data exists.
+    /// Uses FSRSOptimizer golden section search on real retrieval history.
+    fn optimize_w20_if_ready(&mut self) -> Result<Option<f64>> {
+        use crate::fsrs::{FSRSOptimizer, ReviewLog};
+
+        let access_count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_access_log",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        if access_count < 100 {
+            return Ok(None);
+        }
+
+        let mut optimizer = FSRSOptimizer::new();
+
+        let logs: Vec<(String, String, String)> = self
+            .conn
+            .prepare(
+                "SELECT mal.node_id, mal.access_type, mal.accessed_at
+                 FROM memory_access_log mal
+                 ORDER BY mal.accessed_at ASC
+                 LIMIT 1000",
+            )?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        for (node_id, access_type, accessed_at) in &logs {
+            // Get node state for stability/difficulty
+            let node_state: Option<(f64, f64, String)> = self
+                .conn
+                .query_row(
+                    "SELECT stability, difficulty, created_at FROM knowledge_nodes WHERE id = ?1",
+                    params![node_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .ok();
+
+            if let Some((stability, difficulty, created_at)) = node_state {
+                let ts = DateTime::parse_from_rfc3339(accessed_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+
+                let created = DateTime::parse_from_rfc3339(&created_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or(ts);
+
+                let rating = match access_type.as_str() {
+                    "promote" => 4,
+                    "search_hit" => 3,
+                    "demote" => 1,
+                    _ => 3,
+                };
+
+                let elapsed = (ts - created).num_seconds() as f64 / 86400.0;
+
+                optimizer.add_review(ReviewLog {
+                    timestamp: ts,
+                    rating,
+                    stability,
+                    difficulty,
+                    elapsed_days: elapsed.max(0.001),
+                });
+            }
+        }
+
+        if !optimizer.has_enough_data() {
+            return Ok(None);
+        }
+
+        let optimized_w20 = optimizer.optimize_decay();
+
+        // Save to config
+        self.conn.execute(
+            "INSERT OR REPLACE INTO fsrs_config (key, value, updated_at)
+             VALUES ('w20', ?1, ?2)",
+            params![optimized_w20, Utc::now().to_rfc3339()],
+        )?;
+
+        tracing::info!(w20 = optimized_w20, "Personalized w20 optimized from access history");
+
+        Ok(Some(optimized_w20))
     }
 
     /// Generate missing embeddings

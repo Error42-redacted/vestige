@@ -24,6 +24,11 @@ pub const MIGRATIONS: &[Migration] = &[
         description: "GOD TIER 2026: Temporal knowledge graph, memory scopes, embedding versioning",
         up: MIGRATION_V4_UP,
     },
+    Migration {
+        version: 5,
+        description: "FSRS-6 upgrade: access history, ACT-R activation, personalized decay",
+        up: MIGRATION_V5_UP,
+    },
 ];
 
 /// A database migration
@@ -388,6 +393,58 @@ ALTER TABLE knowledge_nodes ADD COLUMN memory_system TEXT DEFAULT 'semantic';
 CREATE INDEX IF NOT EXISTS idx_nodes_memory_system ON knowledge_nodes(memory_system);
 
 UPDATE schema_version SET version = 4, applied_at = datetime('now');
+"#;
+
+/// V5: FSRS-6 Upgrade - Access history for ACT-R activation, personalized decay parameters
+const MIGRATION_V5_UP: &str = r#"
+-- ============================================================================
+-- ACCESS HISTORY (For ACT-R Activation + Parameter Training)
+-- ============================================================================
+
+-- Logs every search hit, promote, demote for ACT-R activation computation
+CREATE TABLE IF NOT EXISTS memory_access_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id TEXT NOT NULL,
+    access_type TEXT NOT NULL,  -- 'search_hit', 'promote', 'demote'
+    accessed_at TEXT NOT NULL,
+    FOREIGN KEY (node_id) REFERENCES knowledge_nodes(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_access_log_node ON memory_access_log(node_id);
+CREATE INDEX IF NOT EXISTS idx_access_log_time ON memory_access_log(accessed_at);
+
+-- ============================================================================
+-- ACT-R ACTIVATION (Pre-computed during consolidation)
+-- ============================================================================
+
+-- B_i = ln(sum(t_j^(-d))) — NULL until first consolidation computes it
+ALTER TABLE knowledge_nodes ADD COLUMN activation REAL;
+
+CREATE INDEX IF NOT EXISTS idx_nodes_activation ON knowledge_nodes(activation);
+
+-- ============================================================================
+-- PERSONALIZED FSRS-6 PARAMETERS
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS fsrs_config (
+    key TEXT PRIMARY KEY,
+    value REAL NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Default w20 (forgetting curve decay parameter)
+INSERT OR IGNORE INTO fsrs_config (key, value, updated_at)
+VALUES ('w20', 0.1542, datetime('now'));
+
+-- ============================================================================
+-- EXTENDED CONSOLIDATION TRACKING
+-- ============================================================================
+
+ALTER TABLE consolidation_history ADD COLUMN duplicates_merged INTEGER DEFAULT 0;
+ALTER TABLE consolidation_history ADD COLUMN activations_computed INTEGER DEFAULT 0;
+ALTER TABLE consolidation_history ADD COLUMN w20_optimized REAL;
+
+UPDATE schema_version SET version = 5, applied_at = datetime('now');
 "#;
 
 /// Get current schema version from database

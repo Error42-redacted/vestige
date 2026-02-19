@@ -26,6 +26,12 @@ pub mod checkpoint;
 pub mod dedup;
 pub mod importance;
 
+// v1.5: Cognitive tools
+pub mod dream;
+pub mod explore;
+pub mod predict;
+pub mod restore;
+
 // Deprecated tools - kept for internal backwards compatibility
 // These modules are intentionally unused in the public API
 #[allow(dead_code)]

@@ -8,6 +8,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::cognitive::CognitiveEngine;
 use vestige_core::{IngestInput, Storage};
 
 /// Input schema for the unified codebase tool
@@ -85,6 +86,7 @@ struct CodebaseArgs {
 /// Execute the unified codebase tool
 pub async fn execute(
     storage: &Arc<Mutex<Storage>>,
+    cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: CodebaseArgs = match args {
@@ -93,9 +95,9 @@ pub async fn execute(
     };
 
     match args.action.as_str() {
-        "remember_pattern" => execute_remember_pattern(storage, &args).await,
-        "remember_decision" => execute_remember_decision(storage, &args).await,
-        "get_context" => execute_get_context(storage, &args).await,
+        "remember_pattern" => execute_remember_pattern(storage, cognitive, &args).await,
+        "remember_decision" => execute_remember_decision(storage, cognitive, &args).await,
+        "get_context" => execute_get_context(storage, cognitive, &args).await,
         _ => Err(format!(
             "Invalid action '{}'. Must be one of: remember_pattern, remember_decision, get_context",
             args.action
@@ -106,6 +108,7 @@ pub async fn execute(
 /// Remember a code pattern
 async fn execute_remember_pattern(
     storage: &Arc<Mutex<Storage>>,
+    cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: &CodebaseArgs,
 ) -> Result<Value, String> {
     let name = args
@@ -152,11 +155,30 @@ async fn execute_remember_pattern(
 
     let mut storage = storage.lock().await;
     let node = storage.ingest(input).map_err(|e| e.to_string())?;
+    let node_id = node.id.clone();
+    drop(storage);
+
+    // ====================================================================
+    // COGNITIVE: Cross-project pattern recording
+    // ====================================================================
+    if let Ok(cog) = cognitive.try_lock() {
+        let codebase_name = args.codebase.as_deref().unwrap_or("default");
+        cog.cross_project.record_project_memory(&node_id, codebase_name, None);
+
+        // Also index in hippocampal index for fast retrieval
+        let _ = cog.hippocampal_index.index_memory(
+            &node_id,
+            &format!("{}: {}", name, description),
+            "pattern",
+            chrono::Utc::now(),
+            None,
+        );
+    }
 
     Ok(serde_json::json!({
         "action": "remember_pattern",
         "success": true,
-        "nodeId": node.id,
+        "nodeId": node_id,
         "patternName": name,
         "message": format!("Pattern '{}' remembered successfully", name),
     }))
@@ -165,6 +187,7 @@ async fn execute_remember_pattern(
 /// Remember an architectural decision
 async fn execute_remember_decision(
     storage: &Arc<Mutex<Storage>>,
+    cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: &CodebaseArgs,
 ) -> Result<Value, String> {
     let decision = args
@@ -229,11 +252,30 @@ async fn execute_remember_decision(
 
     let mut storage = storage.lock().await;
     let node = storage.ingest(input).map_err(|e| e.to_string())?;
+    let node_id = node.id.clone();
+    drop(storage);
+
+    // ====================================================================
+    // COGNITIVE: Cross-project decision recording
+    // ====================================================================
+    if let Ok(cog) = cognitive.try_lock() {
+        let codebase_name = args.codebase.as_deref().unwrap_or("default");
+        cog.cross_project.record_project_memory(&node_id, codebase_name, None);
+
+        // Index in hippocampal index
+        let _ = cog.hippocampal_index.index_memory(
+            &node_id,
+            &format!("Decision: {}", decision),
+            "decision",
+            chrono::Utc::now(),
+            None,
+        );
+    }
 
     Ok(serde_json::json!({
         "action": "remember_decision",
         "success": true,
-        "nodeId": node.id,
+        "nodeId": node_id,
         "message": "Architectural decision remembered successfully",
     }))
 }
@@ -241,14 +283,13 @@ async fn execute_remember_decision(
 /// Get codebase context (patterns and decisions)
 async fn execute_get_context(
     storage: &Arc<Mutex<Storage>>,
+    cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: &CodebaseArgs,
 ) -> Result<Value, String> {
     let limit = args.limit.unwrap_or(10).clamp(1, 50);
     let storage = storage.lock().await;
 
     // Build tag filter for codebase
-    // Tags are stored as: ["pattern", "codebase", "codebase:vestige"]
-    // We search for the "codebase:{name}" tag
     let tag_filter = args
         .codebase
         .as_ref()
@@ -263,6 +304,7 @@ async fn execute_get_context(
     let decisions = storage
         .get_nodes_by_type_and_tag("decision", tag_filter.as_deref(), limit)
         .unwrap_or_default();
+    drop(storage);
 
     let formatted_patterns: Vec<Value> = patterns
         .iter()
@@ -290,6 +332,30 @@ async fn execute_get_context(
         })
         .collect();
 
+    // ====================================================================
+    // COGNITIVE: Cross-project knowledge discovery
+    // ====================================================================
+    let mut universal_patterns = Vec::new();
+    if let Some(codebase_name) = &args.codebase {
+        if let Ok(cog) = cognitive.try_lock() {
+            let context = vestige_core::advanced::cross_project::ProjectContext {
+                path: None,
+                name: Some(codebase_name.clone()),
+                languages: Vec::new(),
+                frameworks: Vec::new(),
+                file_types: std::collections::HashSet::new(),
+                dependencies: Vec::new(),
+                structure: Vec::new(),
+            };
+            let applicable = cog.cross_project.detect_applicable(&context);
+            for knowledge in applicable {
+                universal_patterns.push(serde_json::json!({
+                    "pattern": format!("{:?}", knowledge),
+                }));
+            }
+        }
+    }
+
     Ok(serde_json::json!({
         "action": "get_context",
         "codebase": args.codebase,
@@ -301,6 +367,7 @@ async fn execute_get_context(
             "count": formatted_decisions.len(),
             "items": formatted_decisions,
         },
+        "crossProjectInsights": universal_patterns,
     }))
 }
 
@@ -328,5 +395,196 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&serde_json::json!("get_context")));
+    }
+
+    // === INTEGRATION TESTS ===
+
+    fn test_cognitive() -> Arc<Mutex<CognitiveEngine>> {
+        Arc::new(Mutex::new(CognitiveEngine::new()))
+    }
+
+    async fn test_storage() -> (Arc<Mutex<Storage>>, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
+        (Arc::new(Mutex::new(storage)), dir)
+    }
+
+    #[tokio::test]
+    async fn test_missing_args_fails() {
+        let (storage, _dir) = test_storage().await;
+        let result = execute(&storage, &test_cognitive(), None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing arguments"));
+    }
+
+    #[tokio::test]
+    async fn test_invalid_action_fails() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({ "action": "invalid" });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid action"));
+    }
+
+    #[tokio::test]
+    async fn test_remember_pattern_succeeds() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({
+            "action": "remember_pattern",
+            "name": "Error Handling Pattern",
+            "description": "Use Result<T, E> with custom error types",
+            "files": ["src/lib.rs"],
+            "codebase": "vestige"
+        });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["action"], "remember_pattern");
+        assert_eq!(value["success"], true);
+        assert!(value["nodeId"].is_string());
+        assert_eq!(value["patternName"], "Error Handling Pattern");
+    }
+
+    #[tokio::test]
+    async fn test_remember_pattern_missing_name_fails() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({
+            "action": "remember_pattern",
+            "description": "Some description"
+        });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("'name' is required"));
+    }
+
+    #[tokio::test]
+    async fn test_remember_pattern_missing_description_fails() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({
+            "action": "remember_pattern",
+            "name": "Test Pattern"
+        });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("'description' is required"));
+    }
+
+    #[tokio::test]
+    async fn test_remember_pattern_empty_name_fails() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({
+            "action": "remember_pattern",
+            "name": "   ",
+            "description": "Some description"
+        });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn test_remember_decision_succeeds() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({
+            "action": "remember_decision",
+            "decision": "Use SQLite for storage",
+            "rationale": "Embedded, no separate server needed",
+            "alternatives": ["PostgreSQL", "Redis"],
+            "files": ["src/storage.rs"],
+            "codebase": "vestige"
+        });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["action"], "remember_decision");
+        assert_eq!(value["success"], true);
+        assert!(value["nodeId"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_remember_decision_missing_decision_fails() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({
+            "action": "remember_decision",
+            "rationale": "Some rationale"
+        });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("'decision' is required"));
+    }
+
+    #[tokio::test]
+    async fn test_remember_decision_missing_rationale_fails() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({
+            "action": "remember_decision",
+            "decision": "Use SQLite"
+        });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("'rationale' is required"));
+    }
+
+    #[tokio::test]
+    async fn test_remember_decision_empty_decision_fails() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({
+            "action": "remember_decision",
+            "decision": "  ",
+            "rationale": "Something"
+        });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn test_get_context_empty() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({
+            "action": "get_context",
+            "codebase": "nonexistent"
+        });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["action"], "get_context");
+        assert_eq!(value["patterns"]["count"], 0);
+        assert_eq!(value["decisions"]["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_context_retrieves_saved_patterns() {
+        let (storage, _dir) = test_storage().await;
+        let cog = test_cognitive();
+        // Save a pattern first
+        let save_args = serde_json::json!({
+            "action": "remember_pattern",
+            "name": "Test Pattern",
+            "description": "A test pattern",
+            "codebase": "myproject"
+        });
+        execute(&storage, &cog, Some(save_args)).await.unwrap();
+
+        // Now retrieve
+        let get_args = serde_json::json!({
+            "action": "get_context",
+            "codebase": "myproject"
+        });
+        let result = execute(&storage, &cog, Some(get_args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert!(value["patterns"]["count"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_context_no_codebase() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({ "action": "get_context" });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["action"], "get_context");
+        assert!(value["codebase"].is_null());
     }
 }

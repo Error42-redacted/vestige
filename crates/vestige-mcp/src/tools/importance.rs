@@ -3,13 +3,17 @@
 //! Exposes the 4-channel importance signaling system as an MCP tool.
 //! Wraps ImportanceSignals::compute_importance() from vestige-core's
 //! neuroscience module (dopamine/norepinephrine/acetylcholine/serotonin model).
+//!
+//! v1.5.0: Uses CognitiveEngine's persistent signals so novelty/reward/attention
+//! accumulate across calls (not freshly created per call).
 
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use vestige_core::{ImportanceContext, ImportanceSignals, Storage};
+use crate::cognitive::CognitiveEngine;
+use vestige_core::{ImportanceContext, Storage};
 
 /// Input schema for importance_score tool
 pub fn schema() -> Value {
@@ -44,6 +48,7 @@ struct ImportanceArgs {
 
 pub async fn execute(
     _storage: &Arc<Mutex<Storage>>,
+    cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: ImportanceArgs = match args {
@@ -55,8 +60,6 @@ pub async fn execute(
         return Err("Content cannot be empty".to_string());
     }
 
-    let signals = ImportanceSignals::new();
-
     let mut context = ImportanceContext::current();
     if let Some(project) = args.project {
         context = context.with_project(project);
@@ -65,7 +68,24 @@ pub async fn execute(
         context = context.with_tags(topics);
     }
 
-    let score = signals.compute_importance(&args.content, &context);
+    // Use CognitiveEngine's persistent signals (novelty/reward/attention accumulate)
+    let cog = cognitive.lock().await;
+    let score = cog.importance_signals.compute_importance(&args.content, &context);
+
+    // Also detect emotional markers for richer output
+    let emotional_markers = cog.arousal_signal.detect_emotional_markers(&args.content);
+    drop(cog);
+
+    let markers_json: Vec<Value> = emotional_markers
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "type": format!("{:?}", m.marker_type),
+                "text": m.text,
+                "intensity": m.intensity
+            })
+        })
+        .collect();
 
     Ok(serde_json::json!({
         "composite": score.composite,
@@ -89,6 +109,7 @@ pub async fn execute(
             "reward": score.reward_explanation.as_ref().map(|e| format!("{:?}", e)),
             "attention": score.attention_explanation.as_ref().map(|e| format!("{:?}", e))
         },
+        "emotionalMarkers": markers_json,
         "summary": score.summary(),
         "dominantSignal": score.dominant_signal()
     }))
@@ -97,6 +118,11 @@ pub async fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cognitive::CognitiveEngine;
+
+    fn test_cognitive() -> Arc<Mutex<CognitiveEngine>> {
+        Arc::new(Mutex::new(CognitiveEngine::new()))
+    }
 
     #[test]
     fn test_schema_has_required_fields() {
@@ -114,7 +140,7 @@ mod tests {
         let storage = Arc::new(Mutex::new(
             Storage::new(Some(std::path::PathBuf::from("/tmp/test_importance.db"))).unwrap(),
         ));
-        let result = execute(&storage, Some(serde_json::json!({ "content": "" }))).await;
+        let result = execute(&storage, &test_cognitive(), Some(serde_json::json!({ "content": "" }))).await;
         assert!(result.is_err());
     }
 
@@ -125,6 +151,7 @@ mod tests {
         ));
         let result = execute(
             &storage,
+            &test_cognitive(),
             Some(serde_json::json!({
                 "content": "CRITICAL: Production database migration failed with data loss!"
             })),

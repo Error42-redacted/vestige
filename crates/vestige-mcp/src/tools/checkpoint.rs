@@ -237,4 +237,133 @@ mod tests {
         let value = result.unwrap();
         assert_eq!(value["summary"]["skipped"], 1);
     }
+
+    #[tokio::test]
+    async fn test_missing_args_fails() {
+        let (storage, _dir) = test_storage().await;
+        let result = execute(&storage, None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing arguments"));
+    }
+
+    #[tokio::test]
+    async fn test_exceeds_20_items_fails() {
+        let (storage, _dir) = test_storage().await;
+        let items: Vec<serde_json::Value> = (0..21)
+            .map(|i| serde_json::json!({ "content": format!("Item {}", i) }))
+            .collect();
+        let result = execute(&storage, Some(serde_json::json!({ "items": items }))).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Maximum 20 items"));
+    }
+
+    #[tokio::test]
+    async fn test_exactly_20_items_succeeds() {
+        let (storage, _dir) = test_storage().await;
+        let items: Vec<serde_json::Value> = (0..20)
+            .map(|i| serde_json::json!({ "content": format!("Item {}", i) }))
+            .collect();
+        let result = execute(&storage, Some(serde_json::json!({ "items": items }))).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["summary"]["total"], 20);
+    }
+
+    #[tokio::test]
+    async fn test_skips_whitespace_only_content() {
+        let (storage, _dir) = test_storage().await;
+        let result = execute(
+            &storage,
+            Some(serde_json::json!({
+                "items": [
+                    { "content": "   \t\n  " },
+                    { "content": "Valid content" }
+                ]
+            })),
+        )
+        .await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["summary"]["skipped"], 1);
+        assert_eq!(value["summary"]["created"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_single_item_succeeds() {
+        let (storage, _dir) = test_storage().await;
+        let result = execute(
+            &storage,
+            Some(serde_json::json!({
+                "items": [{ "content": "Single item" }]
+            })),
+        )
+        .await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["summary"]["total"], 1);
+        assert_eq!(value["success"], true);
+    }
+
+    #[tokio::test]
+    async fn test_items_with_all_fields() {
+        let (storage, _dir) = test_storage().await;
+        let result = execute(
+            &storage,
+            Some(serde_json::json!({
+                "items": [{
+                    "content": "Full fields item",
+                    "tags": ["test", "checkpoint"],
+                    "node_type": "decision",
+                    "source": "test-suite"
+                }]
+            })),
+        )
+        .await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["summary"]["created"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_results_array_matches_items() {
+        let (storage, _dir) = test_storage().await;
+        let result = execute(
+            &storage,
+            Some(serde_json::json!({
+                "items": [
+                    { "content": "First" },
+                    { "content": "" },
+                    { "content": "Third" }
+                ]
+            })),
+        )
+        .await;
+        let value = result.unwrap();
+        let results = value["results"].as_array().unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0]["index"], 0);
+        assert_eq!(results[1]["index"], 1);
+        assert_eq!(results[1]["status"], "skipped");
+        assert_eq!(results[2]["index"], 2);
+    }
+
+    #[tokio::test]
+    async fn test_success_false_when_errors() {
+        // All items empty = all skipped = 0 errors = success true
+        let (storage, _dir) = test_storage().await;
+        let result = execute(
+            &storage,
+            Some(serde_json::json!({
+                "items": [
+                    { "content": "" },
+                    { "content": "   " }
+                ]
+            })),
+        )
+        .await;
+        let value = result.unwrap();
+        assert_eq!(value["success"], true); // skipped ≠ errors
+        assert_eq!(value["summary"]["errors"], 0);
+        assert_eq!(value["summary"]["skipped"], 2);
+    }
 }

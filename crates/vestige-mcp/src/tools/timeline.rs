@@ -58,6 +58,7 @@ pub fn schema() -> Value {
 struct TimelineArgs {
     start: Option<String>,
     end: Option<String>,
+    #[serde(alias = "node_type")]
     node_type: Option<String>,
     tags: Option<Vec<String>>,
     limit: Option<i32>,
@@ -181,4 +182,185 @@ pub async fn execute(
         "days": days,
         "timeline": timeline,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
+        (Arc::new(Mutex::new(storage)), dir)
+    }
+
+    async fn ingest_test_memory(storage: &Arc<Mutex<Storage>>, content: &str) {
+        let mut s = storage.lock().await;
+        s.ingest(vestige_core::IngestInput {
+            content: content.to_string(),
+            node_type: "fact".to_string(),
+            source: None,
+            sentiment_score: 0.0,
+            sentiment_magnitude: 0.0,
+            tags: vec!["timeline-test".to_string()],
+            valid_from: None,
+            valid_until: None,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_schema_has_properties() {
+        let s = schema();
+        assert_eq!(s["type"], "object");
+        assert!(s["properties"]["start"].is_object());
+        assert!(s["properties"]["end"].is_object());
+        assert!(s["properties"]["node_type"].is_object());
+        assert!(s["properties"]["tags"].is_object());
+        assert!(s["properties"]["limit"].is_object());
+        assert!(s["properties"]["detail_level"].is_object());
+    }
+
+    #[test]
+    fn test_parse_datetime_rfc3339() {
+        let result = parse_datetime("2026-02-18T10:30:00Z");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_datetime_date_only() {
+        let result = parse_datetime("2026-02-18");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_datetime_invalid() {
+        let result = parse_datetime("not-a-date");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid date/datetime"));
+    }
+
+    #[test]
+    fn test_parse_datetime_empty() {
+        let result = parse_datetime("");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_timeline_no_args_defaults() {
+        let (storage, _dir) = test_storage().await;
+        let result = execute(&storage, None).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["tool"], "memory_timeline");
+        assert_eq!(value["detailLevel"], "summary");
+        assert!(value["range"]["start"].is_string());
+        assert!(value["range"]["end"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_timeline_empty_database() {
+        let (storage, _dir) = test_storage().await;
+        let result = execute(&storage, None).await;
+        let value = result.unwrap();
+        assert_eq!(value["totalMemories"], 0);
+        assert_eq!(value["days"], 0);
+        assert!(value["timeline"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_timeline_with_memories() {
+        let (storage, _dir) = test_storage().await;
+        ingest_test_memory(&storage, "Timeline test memory 1").await;
+        ingest_test_memory(&storage, "Timeline test memory 2").await;
+        let result = execute(&storage, None).await;
+        let value = result.unwrap();
+        assert_eq!(value["totalMemories"], 2);
+        assert!(value["days"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_timeline_invalid_detail_level() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({ "detail_level": "invalid" });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid detail_level"));
+    }
+
+    #[tokio::test]
+    async fn test_timeline_detail_level_brief() {
+        let (storage, _dir) = test_storage().await;
+        ingest_test_memory(&storage, "Brief test memory").await;
+        let args = serde_json::json!({ "detail_level": "brief" });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["detailLevel"], "brief");
+    }
+
+    #[tokio::test]
+    async fn test_timeline_detail_level_full() {
+        let (storage, _dir) = test_storage().await;
+        ingest_test_memory(&storage, "Full test memory").await;
+        let args = serde_json::json!({ "detail_level": "full" });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["detailLevel"], "full");
+    }
+
+    #[tokio::test]
+    async fn test_timeline_limit_clamped() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({ "limit": 0 });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_ok()); // limit clamped to 1, no error
+    }
+
+    #[tokio::test]
+    async fn test_timeline_with_date_range() {
+        let (storage, _dir) = test_storage().await;
+        ingest_test_memory(&storage, "Ranged memory").await;
+        let args = serde_json::json!({
+            "start": "2020-01-01",
+            "end": "2030-12-31"
+        });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert!(value["totalMemories"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_timeline_node_type_filter() {
+        let (storage, _dir) = test_storage().await;
+        ingest_test_memory(&storage, "A fact memory").await;
+        let args = serde_json::json!({ "node_type": "concept" });
+        let result = execute(&storage, Some(args)).await;
+        let value = result.unwrap();
+        // Ingested as "fact", filtering for "concept" should yield 0
+        assert_eq!(value["totalMemories"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_timeline_tag_filter() {
+        let (storage, _dir) = test_storage().await;
+        ingest_test_memory(&storage, "Tagged memory").await;
+        let args = serde_json::json!({ "tags": ["timeline-test"] });
+        let result = execute(&storage, Some(args)).await;
+        let value = result.unwrap();
+        assert!(value["totalMemories"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_timeline_tag_filter_no_match() {
+        let (storage, _dir) = test_storage().await;
+        ingest_test_memory(&storage, "Tagged memory").await;
+        let args = serde_json::json!({ "tags": ["nonexistent-tag"] });
+        let result = execute(&storage, Some(args)).await;
+        let value = result.unwrap();
+        assert_eq!(value["totalMemories"], 0);
+    }
 }

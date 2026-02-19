@@ -220,4 +220,163 @@ mod tests {
         assert!(schema["properties"]["id"].is_object());
         assert_eq!(schema["required"], serde_json::json!(["action", "id"]));
     }
+
+    // === INTEGRATION TESTS ===
+
+    async fn test_storage() -> (Arc<Mutex<Storage>>, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
+        (Arc::new(Mutex::new(storage)), dir)
+    }
+
+    async fn ingest_memory(storage: &Arc<Mutex<Storage>>) -> String {
+        let mut s = storage.lock().await;
+        let node = s
+            .ingest(vestige_core::IngestInput {
+                content: "Memory unified test content".to_string(),
+                node_type: "fact".to_string(),
+                source: Some("test".to_string()),
+                sentiment_score: 0.0,
+                sentiment_magnitude: 0.0,
+                tags: vec!["test-tag".to_string()],
+                valid_from: None,
+                valid_until: None,
+            })
+            .unwrap();
+        node.id
+    }
+
+    #[tokio::test]
+    async fn test_missing_args_fails() {
+        let (storage, _dir) = test_storage().await;
+        let result = execute(&storage, None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing arguments"));
+    }
+
+    #[tokio::test]
+    async fn test_invalid_action_fails() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({ "action": "invalid", "id": "00000000-0000-0000-0000-000000000000" });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid action"));
+    }
+
+    #[tokio::test]
+    async fn test_invalid_uuid_fails() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({ "action": "get", "id": "not-a-uuid" });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid memory ID format"));
+    }
+
+    #[tokio::test]
+    async fn test_get_existing_memory() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+        let args = serde_json::json!({ "action": "get", "id": id });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["action"], "get");
+        assert_eq!(value["found"], true);
+        assert_eq!(value["node"]["id"], id);
+        assert_eq!(value["node"]["content"], "Memory unified test content");
+        assert_eq!(value["node"]["nodeType"], "fact");
+        assert!(value["node"]["createdAt"].is_string());
+        assert!(value["node"]["tags"].is_array());
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent_memory() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({ "action": "get", "id": "00000000-0000-0000-0000-000000000000" });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["found"], false);
+        assert_eq!(value["message"], "Memory not found");
+    }
+
+    #[tokio::test]
+    async fn test_delete_existing_memory() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+        let args = serde_json::json!({ "action": "delete", "id": id });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["action"], "delete");
+        assert_eq!(value["success"], true);
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_memory() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({ "action": "delete", "id": "00000000-0000-0000-0000-000000000000" });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["success"], false);
+        assert!(value["message"].as_str().unwrap().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_then_get_returns_not_found() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+        let del_args = serde_json::json!({ "action": "delete", "id": id });
+        execute(&storage, Some(del_args)).await.unwrap();
+        let get_args = serde_json::json!({ "action": "get", "id": id });
+        let result = execute(&storage, Some(get_args)).await;
+        let value = result.unwrap();
+        assert_eq!(value["found"], false);
+    }
+
+    #[tokio::test]
+    async fn test_state_existing_memory() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+        let args = serde_json::json!({ "action": "state", "id": id });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["action"], "state");
+        assert_eq!(value["memoryId"], id);
+        assert!(value["accessibility"].is_number());
+        assert!(value["state"].is_string());
+        assert!(value["description"].is_string());
+        assert!(value["components"]["retentionStrength"].is_number());
+        assert!(value["components"]["retrievalStrength"].is_number());
+        assert!(value["components"]["storageStrength"].is_number());
+        assert_eq!(value["thresholds"]["active"], 0.7);
+        assert_eq!(value["thresholds"]["dormant"], 0.4);
+        assert_eq!(value["thresholds"]["silent"], 0.1);
+    }
+
+    #[tokio::test]
+    async fn test_state_nonexistent_memory_fails() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({ "action": "state", "id": "00000000-0000-0000-0000-000000000000" });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn test_accessibility_boundary_active() {
+        // Exactly at active threshold
+        let a = compute_accessibility(1.0, 0.7, 0.5);
+        assert!(a >= ACCESSIBILITY_ACTIVE);
+        assert!(matches!(state_from_accessibility(a), MemoryState::Active));
+    }
+
+    #[test]
+    fn test_accessibility_boundary_zero() {
+        let a = compute_accessibility(0.0, 0.0, 0.0);
+        assert_eq!(a, 0.0);
+        assert!(matches!(state_from_accessibility(a), MemoryState::Unavailable));
+    }
 }

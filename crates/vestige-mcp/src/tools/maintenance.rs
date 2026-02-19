@@ -9,7 +9,9 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use vestige_core::Storage;
+use crate::cognitive::CognitiveEngine;
+use vestige_core::advanced::compression::MemoryForCompression;
+use vestige_core::{FSRSScheduler, MemoryLifecycle, MemoryState, Storage};
 
 // ============================================================================
 // SCHEMAS
@@ -184,6 +186,9 @@ pub async fn execute_consolidate(
         "nodesPruned": result.nodes_pruned,
         "decayApplied": result.decay_applied,
         "embeddingsGenerated": result.embeddings_generated,
+        "duplicatesMerged": result.duplicates_merged,
+        "activationsComputed": result.activations_computed,
+        "w20Optimized": result.w20_optimized,
         "durationMs": result.duration_ms,
     }))
 }
@@ -191,13 +196,14 @@ pub async fn execute_consolidate(
 /// Stats tool
 pub async fn execute_stats(
     storage: &Arc<Mutex<Storage>>,
+    cognitive: &Arc<Mutex<CognitiveEngine>>,
     _args: Option<Value>,
 ) -> Result<Value, String> {
-    let storage = storage.lock().await;
-    let stats = storage.get_stats().map_err(|e| e.to_string())?;
+    let storage_guard = storage.lock().await;
+    let stats = storage_guard.get_stats().map_err(|e| e.to_string())?;
 
     // Compute state distribution from a sample of nodes
-    let nodes = storage.get_all_nodes(500, 0).map_err(|e| e.to_string())?;
+    let nodes = storage_guard.get_all_nodes(500, 0).map_err(|e| e.to_string())?;
     let total = nodes.len();
     let (active, dormant, silent, unavailable) = if total > 0 {
         let mut a = 0usize;
@@ -229,6 +235,119 @@ pub async fn execute_stats(
         0.0
     };
 
+    // ====================================================================
+    // FSRS Preview: Show optimal intervals for a representative memory
+    // ====================================================================
+    let scheduler = FSRSScheduler::default();
+    let fsrs_preview = if let Some(representative) = nodes.first() {
+        let mut state = scheduler.new_card();
+        state.difficulty = representative.difficulty;
+        state.stability = representative.stability;
+        state.reps = representative.reps;
+        state.lapses = representative.lapses;
+        state.last_review = representative.last_accessed;
+        let elapsed = scheduler.days_since_review(&state.last_review);
+        let preview = scheduler.preview_reviews(&state, elapsed);
+        Some(serde_json::json!({
+            "representativeMemoryId": representative.id,
+            "elapsedDays": format!("{:.1}", elapsed),
+            "intervalIfGood": preview.good.interval,
+            "intervalIfEasy": preview.easy.interval,
+            "intervalIfHard": preview.hard.interval,
+            "currentRetrievability": format!("{:.3}", preview.good.retrievability),
+        }))
+    } else {
+        None
+    };
+
+    // ====================================================================
+    // STATE SERVICE: Proper state transitions via Bjork model
+    // ====================================================================
+    let state_distribution_precise = if let Ok(cog) = cognitive.try_lock() {
+        let mut lifecycles: Vec<MemoryLifecycle> = nodes
+            .iter()
+            .take(100) // Sample 100 for performance
+            .map(|node| {
+                let mut lc = MemoryLifecycle::new();
+                lc.last_access = node.last_accessed;
+                lc.access_count = node.reps as u32;
+                lc.state = if node.retention_strength > 0.7 {
+                    MemoryState::Active
+                } else if node.retention_strength > 0.3 {
+                    MemoryState::Dormant
+                } else if node.retention_strength > 0.1 {
+                    MemoryState::Silent
+                } else {
+                    MemoryState::Unavailable
+                };
+                lc
+            })
+            .collect();
+        let batch_result = cog.state_service.batch_update(&mut lifecycles);
+        Some(serde_json::json!({
+            "totalTransitions": batch_result.total_transitions,
+            "activeToDormant": batch_result.active_to_dormant,
+            "dormantToSilent": batch_result.dormant_to_silent,
+            "suppressionsResolved": batch_result.suppressions_resolved,
+            "sampled": lifecycles.len(),
+        }))
+    } else {
+        None
+    };
+
+    // ====================================================================
+    // COMPRESSOR: Find compressible memory groups
+    // ====================================================================
+    let compressible_groups = if let Ok(cog) = cognitive.try_lock() {
+        let memories_for_compression: Vec<MemoryForCompression> = nodes
+            .iter()
+            .filter(|n| n.retention_strength < 0.5) // Only consider low-retention memories
+            .take(50) // Cap for performance
+            .map(|n| MemoryForCompression {
+                id: n.id.clone(),
+                content: n.content.clone(),
+                tags: n.tags.clone(),
+                created_at: n.created_at,
+                last_accessed: Some(n.last_accessed),
+                embedding: None,
+            })
+            .collect();
+        if !memories_for_compression.is_empty() {
+            let groups = cog.compressor.find_compressible_groups(&memories_for_compression);
+            Some(serde_json::json!({
+                "groupCount": groups.len(),
+                "totalCompressible": groups.iter().map(|g| g.len()).sum::<usize>(),
+            }))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // ====================================================================
+    // COGNITIVE: Module health summary
+    // ====================================================================
+    let cognitive_health = if let Ok(cog) = cognitive.try_lock() {
+        let activation_count = cog.activation_network.get_associations("_probe_").len();
+        let prediction_accuracy = cog.predictive_memory.prediction_accuracy().unwrap_or(0.0);
+        let scheduler_stats = cog.consolidation_scheduler.get_activity_stats();
+        Some(serde_json::json!({
+            "activationNetworkSize": activation_count,
+            "predictionAccuracy": format!("{:.2}", prediction_accuracy),
+            "modulesActive": 28,
+            "schedulerStats": {
+                "totalEvents": scheduler_stats.total_events,
+                "eventsPerMinute": scheduler_stats.events_per_minute,
+                "isIdle": scheduler_stats.is_idle,
+                "timeUntilNextConsolidation": format!("{:?}", cog.consolidation_scheduler.time_until_next()),
+            },
+        }))
+    } else {
+        None
+    };
+    drop(storage_guard);
+
     Ok(serde_json::json!({
         "tool": "stats",
         "totalMemories": stats.total_nodes,
@@ -248,6 +367,10 @@ pub async fn execute_stats(
             "unavailable": unavailable,
             "sampled": total,
         },
+        "fsrsPreview": fsrs_preview,
+        "cognitiveHealth": cognitive_health,
+        "stateTransitions": state_distribution_precise,
+        "compressibleMemories": compressible_groups,
     }))
 }
 

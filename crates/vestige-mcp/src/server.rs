@@ -4,10 +4,12 @@
 //! tool and resource handlers.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+use crate::cognitive::CognitiveEngine;
 use crate::protocol::messages::{
     CallToolRequest, CallToolResult, InitializeRequest, InitializeResult,
     ListResourcesResult, ListToolsResult, ReadResourceRequest, ReadResourceResult,
@@ -21,14 +23,19 @@ use vestige_core::Storage;
 /// MCP Server implementation
 pub struct McpServer {
     storage: Arc<Mutex<Storage>>,
+    cognitive: Arc<Mutex<CognitiveEngine>>,
     initialized: bool,
+    /// Tool call counter for inline consolidation trigger (every 100 calls)
+    tool_call_count: AtomicU64,
 }
 
 impl McpServer {
-    pub fn new(storage: Arc<Mutex<Storage>>) -> Self {
+    pub fn new(storage: Arc<Mutex<Storage>>, cognitive: Arc<Mutex<CognitiveEngine>>) -> Self {
         Self {
             storage,
+            cognitive,
             initialized: false,
+            tool_call_count: AtomicU64::new(0),
         }
     }
 
@@ -240,6 +247,32 @@ impl McpServer {
                 description: Some("Find duplicate and near-duplicate memory clusters using cosine similarity on embeddings. Returns clusters with suggested actions (merge/review). Use to clean up redundant memories.".to_string()),
                 input_schema: tools::dedup::schema(),
             },
+            // ================================================================
+            // COGNITIVE TOOLS (v1.5+)
+            // ================================================================
+            ToolDescription {
+                name: "dream".to_string(),
+                description: Some("Trigger memory dreaming — replays recent memories to discover hidden connections, synthesize insights, and strengthen important patterns. Returns insights, connections, and dream stats.".to_string()),
+                input_schema: tools::dream::schema(),
+            },
+            ToolDescription {
+                name: "explore_connections".to_string(),
+                description: Some("Graph exploration tool for memory connections. Actions: 'chain' (build reasoning path between memories), 'associations' (find related memories via spreading activation + hippocampal index), 'bridges' (find connecting memories between two nodes).".to_string()),
+                input_schema: tools::explore::schema(),
+            },
+            ToolDescription {
+                name: "predict".to_string(),
+                description: Some("Proactive memory prediction — predicts what memories you'll need next based on context, recent activity, and learned patterns. Returns predictions, suggestions, and speculative retrievals.".to_string()),
+                input_schema: tools::predict::schema(),
+            },
+            // ================================================================
+            // RESTORE TOOL (v1.5+)
+            // ================================================================
+            ToolDescription {
+                name: "restore".to_string(),
+                description: Some("Restore memories from a JSON backup file. Supports MCP wrapper format, RecallResult format, and direct memory array format.".to_string()),
+                input_schema: tools::restore::schema(),
+            },
         ];
 
         let result = ListToolsResult { tools };
@@ -256,20 +289,26 @@ impl McpServer {
             None => return Err(JsonRpcError::invalid_params("Missing tool call parameters")),
         };
 
+        // Record activity on every tool call (non-blocking)
+        if let Ok(mut cog) = self.cognitive.try_lock() {
+            cog.activity_tracker.record_activity();
+            cog.consolidation_scheduler.record_activity();
+        }
+
         let result = match request.name.as_str() {
             // ================================================================
             // UNIFIED TOOLS (v1.1+) - Preferred API
             // ================================================================
-            "search" => tools::search_unified::execute(&self.storage, request.arguments).await,
+            "search" => tools::search_unified::execute(&self.storage, &self.cognitive, request.arguments).await,
             "memory" => tools::memory_unified::execute(&self.storage, request.arguments).await,
-            "codebase" => tools::codebase_unified::execute(&self.storage, request.arguments).await,
-            "intention" => tools::intention_unified::execute(&self.storage, request.arguments).await,
+            "codebase" => tools::codebase_unified::execute(&self.storage, &self.cognitive, request.arguments).await,
+            "intention" => tools::intention_unified::execute(&self.storage, &self.cognitive, request.arguments).await,
 
             // ================================================================
             // Core memory tools
             // ================================================================
-            "ingest" => tools::ingest::execute(&self.storage, request.arguments).await,
-            "smart_ingest" => tools::smart_ingest::execute(&self.storage, request.arguments).await,
+            "ingest" => tools::ingest::execute(&self.storage, &self.cognitive, request.arguments).await,
+            "smart_ingest" => tools::smart_ingest::execute(&self.storage, &self.cognitive, request.arguments).await,
             "mark_reviewed" => tools::review::execute(&self.storage, request.arguments).await,
 
             // ================================================================
@@ -277,7 +316,7 @@ impl McpServer {
             // ================================================================
             "recall" | "semantic_search" | "hybrid_search" => {
                 warn!("Tool '{}' is deprecated. Use 'search' instead.", request.name);
-                tools::search_unified::execute(&self.storage, request.arguments).await
+                tools::search_unified::execute(&self.storage, &self.cognitive, request.arguments).await
             }
 
             // ================================================================
@@ -345,7 +384,7 @@ impl McpServer {
                     }
                     None => Some(serde_json::json!({"action": "remember_pattern"})),
                 };
-                tools::codebase_unified::execute(&self.storage, unified_args).await
+                tools::codebase_unified::execute(&self.storage, &self.cognitive, unified_args).await
             }
             "remember_decision" => {
                 warn!("Tool 'remember_decision' is deprecated. Use 'codebase' with action='remember_decision' instead.");
@@ -360,7 +399,7 @@ impl McpServer {
                     }
                     None => Some(serde_json::json!({"action": "remember_decision"})),
                 };
-                tools::codebase_unified::execute(&self.storage, unified_args).await
+                tools::codebase_unified::execute(&self.storage, &self.cognitive, unified_args).await
             }
             "get_codebase_context" => {
                 warn!("Tool 'get_codebase_context' is deprecated. Use 'codebase' with action='get_context' instead.");
@@ -375,7 +414,7 @@ impl McpServer {
                     }
                     None => Some(serde_json::json!({"action": "get_context"})),
                 };
-                tools::codebase_unified::execute(&self.storage, unified_args).await
+                tools::codebase_unified::execute(&self.storage, &self.cognitive, unified_args).await
             }
 
             // ================================================================
@@ -394,7 +433,7 @@ impl McpServer {
                     }
                     None => Some(serde_json::json!({"action": "set"})),
                 };
-                tools::intention_unified::execute(&self.storage, unified_args).await
+                tools::intention_unified::execute(&self.storage, &self.cognitive, unified_args).await
             }
             "check_intentions" => {
                 warn!("Tool 'check_intentions' is deprecated. Use 'intention' with action='check' instead.");
@@ -409,7 +448,7 @@ impl McpServer {
                     }
                     None => Some(serde_json::json!({"action": "check"})),
                 };
-                tools::intention_unified::execute(&self.storage, unified_args).await
+                tools::intention_unified::execute(&self.storage, &self.cognitive, unified_args).await
             }
             "complete_intention" => {
                 warn!("Tool 'complete_intention' is deprecated. Use 'intention' with action='update', status='complete' instead.");
@@ -425,7 +464,7 @@ impl McpServer {
                     }
                     None => None,
                 };
-                tools::intention_unified::execute(&self.storage, unified_args).await
+                tools::intention_unified::execute(&self.storage, &self.cognitive, unified_args).await
             }
             "snooze_intention" => {
                 warn!("Tool 'snooze_intention' is deprecated. Use 'intention' with action='update', status='snooze' instead.");
@@ -443,7 +482,7 @@ impl McpServer {
                     }
                     None => None,
                 };
-                tools::intention_unified::execute(&self.storage, unified_args).await
+                tools::intention_unified::execute(&self.storage, &self.cognitive, unified_args).await
             }
             "list_intentions" => {
                 warn!("Tool 'list_intentions' is deprecated. Use 'intention' with action='list' instead.");
@@ -462,7 +501,7 @@ impl McpServer {
                     }
                     None => Some(serde_json::json!({"action": "list"})),
                 };
-                tools::intention_unified::execute(&self.storage, unified_args).await
+                tools::intention_unified::execute(&self.storage, &self.cognitive, unified_args).await
             }
 
             // ================================================================
@@ -483,8 +522,8 @@ impl McpServer {
             // ================================================================
             // Feedback / preference learning (not deprecated)
             // ================================================================
-            "promote_memory" => tools::feedback::execute_promote(&self.storage, request.arguments).await,
-            "demote_memory" => tools::feedback::execute_demote(&self.storage, request.arguments).await,
+            "promote_memory" => tools::feedback::execute_promote(&self.storage, &self.cognitive, request.arguments).await,
+            "demote_memory" => tools::feedback::execute_demote(&self.storage, &self.cognitive, request.arguments).await,
             "request_feedback" => tools::feedback::execute_request_feedback(&self.storage, request.arguments).await,
 
             // ================================================================
@@ -498,7 +537,7 @@ impl McpServer {
             // ================================================================
             "health_check" => tools::maintenance::execute_health_check(&self.storage, request.arguments).await,
             "consolidate" => tools::maintenance::execute_consolidate(&self.storage, request.arguments).await,
-            "stats" => tools::maintenance::execute_stats(&self.storage, request.arguments).await,
+            "stats" => tools::maintenance::execute_stats(&self.storage, &self.cognitive, request.arguments).await,
             "backup" => tools::maintenance::execute_backup(&self.storage, request.arguments).await,
             "export" => tools::maintenance::execute_export(&self.storage, request.arguments).await,
             "gc" => tools::maintenance::execute_gc(&self.storage, request.arguments).await,
@@ -506,9 +545,17 @@ impl McpServer {
             // ================================================================
             // AUTO-SAVE & DEDUP TOOLS (v1.3+)
             // ================================================================
-            "importance_score" => tools::importance::execute(&self.storage, request.arguments).await,
+            "importance_score" => tools::importance::execute(&self.storage, &self.cognitive, request.arguments).await,
             "session_checkpoint" => tools::checkpoint::execute(&self.storage, request.arguments).await,
             "find_duplicates" => tools::dedup::execute(&self.storage, request.arguments).await,
+
+            // ================================================================
+            // COGNITIVE TOOLS (v1.5+)
+            // ================================================================
+            "dream" => tools::dream::execute(&self.storage, &self.cognitive, request.arguments).await,
+            "explore_connections" => tools::explore::execute(&self.storage, &self.cognitive, request.arguments).await,
+            "predict" => tools::predict::execute(&self.storage, &self.cognitive, request.arguments).await,
+            "restore" => tools::restore::execute(&self.storage, request.arguments).await,
 
             name => {
                 return Err(JsonRpcError::method_not_found_with_message(&format!(
@@ -518,7 +565,7 @@ impl McpServer {
             }
         };
 
-        match result {
+        let response = match result {
             Ok(content) => {
                 let call_result = CallToolResult {
                     content: vec![crate::protocol::messages::ToolResultContent {
@@ -539,7 +586,45 @@ impl McpServer {
                 };
                 serde_json::to_value(call_result).map_err(|e| JsonRpcError::internal_error(&e.to_string()))
             }
+        };
+
+        // Inline consolidation trigger: uses ConsolidationScheduler instead of fixed count
+        let count = self.tool_call_count.fetch_add(1, Ordering::Relaxed) + 1;
+        let should_consolidate = self.cognitive.try_lock()
+            .ok()
+            .map(|cog| cog.consolidation_scheduler.should_consolidate())
+            .unwrap_or(count % 100 == 0); // Fallback to count-based if lock unavailable
+
+        if should_consolidate {
+            let storage_clone = Arc::clone(&self.storage);
+            let cognitive_clone = Arc::clone(&self.cognitive);
+            tokio::spawn(async move {
+                // Expire labile reconsolidation windows
+                if let Ok(mut cog) = cognitive_clone.try_lock() {
+                    let _expired = cog.reconsolidation.reconsolidate_expired();
+                }
+
+                if let Ok(mut storage) = storage_clone.try_lock() {
+                    match storage.run_consolidation() {
+                        Ok(result) => {
+                            tracing::info!(
+                                tool_calls = count,
+                                decay_applied = result.decay_applied,
+                                duplicates_merged = result.duplicates_merged,
+                                activations_computed = result.activations_computed,
+                                duration_ms = result.duration_ms,
+                                "Inline consolidation triggered (scheduler)"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("Inline consolidation failed: {}", e);
+                        }
+                    }
+                }
+            });
         }
+
+        response
     }
 
     /// Handle resources/list request
@@ -676,7 +761,8 @@ mod tests {
     /// Create a test server with temporary storage
     async fn test_server() -> (McpServer, TempDir) {
         let (storage, dir) = test_storage().await;
-        let server = McpServer::new(storage);
+        let cognitive = Arc::new(Mutex::new(CognitiveEngine::new()));
+        let server = McpServer::new(storage, cognitive);
         (server, dir)
     }
 
@@ -814,7 +900,7 @@ mod tests {
         let tools = result["tools"].as_array().unwrap();
 
         // v1.3+: 19 tools (8 unified + 2 temporal + 6 maintenance + 3 auto-save/dedup)
-        assert_eq!(tools.len(), 19, "Expected exactly 19 tools in v1.3+");
+        assert_eq!(tools.len(), 23, "Expected exactly 23 tools in v1.5+");
 
         let tool_names: Vec<&str> = tools
             .iter()
@@ -851,6 +937,12 @@ mod tests {
         assert!(tool_names.contains(&"importance_score"));
         assert!(tool_names.contains(&"session_checkpoint"));
         assert!(tool_names.contains(&"find_duplicates"));
+
+        // Cognitive tools (v1.5)
+        assert!(tool_names.contains(&"dream"));
+        assert!(tool_names.contains(&"explore_connections"));
+        assert!(tool_names.contains(&"predict"));
+        assert!(tool_names.contains(&"restore"));
     }
 
     #[tokio::test]

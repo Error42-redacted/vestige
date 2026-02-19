@@ -188,6 +188,10 @@ impl ConsolidationRun {
             decay_applied: self.decay_applied,
             duration_ms: self.start_time.elapsed().as_millis() as i64,
             embeddings_generated: self.embeddings_generated,
+            duplicates_merged: 0,
+            neighbors_reinforced: 0,
+            activations_computed: 0,
+            w20_optimized: None,
         }
     }
 }

@@ -27,6 +27,7 @@
 //! - Reconsolidation (memories editable on retrieval)
 //! - Memory Chains (reasoning paths)
 
+pub mod cognitive;
 mod protocol;
 mod resources;
 mod server;
@@ -156,54 +157,70 @@ async fn main() {
         }
     };
 
-    // Spawn background auto-consolidation so FSRS-6 decay scores stay fresh.
-    // Runs only if the last consolidation was more than 6 hours ago.
+    // Spawn periodic auto-consolidation so FSRS-6 decay scores stay fresh.
+    // Runs on startup (if needed) and then every N hours (default: 6).
+    // Configurable via VESTIGE_CONSOLIDATION_INTERVAL_HOURS env var.
     {
         let storage_clone = storage.clone();
         tokio::spawn(async move {
+            let interval_hours: u64 = std::env::var("VESTIGE_CONSOLIDATION_INTERVAL_HOURS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(6);
+
             // Small delay so we don't block server startup / stdio handshake
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-            let mut storage = storage_clone.lock().await;
+            loop {
+                // Check whether consolidation is actually needed
+                let should_run = {
+                    let storage = storage_clone.lock().await;
+                    match storage.get_last_consolidation() {
+                        Ok(Some(last)) => {
+                            let elapsed = chrono::Utc::now() - last;
+                            let stale = elapsed > chrono::Duration::hours(interval_hours as i64);
+                            if !stale {
+                                info!(
+                                    last_consolidation = %last,
+                                    "Skipping auto-consolidation (last run was < {} hours ago)",
+                                    interval_hours
+                                );
+                            }
+                            stale
+                        }
+                        Ok(None) => {
+                            info!("No previous consolidation found — running first auto-consolidation");
+                            true
+                        }
+                        Err(e) => {
+                            warn!("Could not read consolidation history: {} — running anyway", e);
+                            true
+                        }
+                    }
+                };
 
-            // Check whether consolidation is actually needed
-            let should_run = match storage.get_last_consolidation() {
-                Ok(Some(last)) => {
-                    let elapsed = chrono::Utc::now() - last;
-                    let stale = elapsed > chrono::Duration::hours(6);
-                    if !stale {
-                        info!(
-                            last_consolidation = %last,
-                            "Skipping auto-consolidation (last run was < 6 hours ago)"
-                        );
+                if should_run {
+                    let mut storage = storage_clone.lock().await;
+                    match storage.run_consolidation() {
+                        Ok(result) => {
+                            info!(
+                                nodes_processed = result.nodes_processed,
+                                decay_applied = result.decay_applied,
+                                embeddings_generated = result.embeddings_generated,
+                                duplicates_merged = result.duplicates_merged,
+                                activations_computed = result.activations_computed,
+                                duration_ms = result.duration_ms,
+                                "Periodic auto-consolidation complete"
+                            );
+                        }
+                        Err(e) => {
+                            warn!("Periodic auto-consolidation failed: {}", e);
+                        }
                     }
-                    stale
                 }
-                Ok(None) => {
-                    info!("No previous consolidation found — running first auto-consolidation");
-                    true
-                }
-                Err(e) => {
-                    warn!("Could not read consolidation history: {} — running anyway", e);
-                    true
-                }
-            };
 
-            if should_run {
-                match storage.run_consolidation() {
-                    Ok(result) => {
-                        info!(
-                            nodes_processed = result.nodes_processed,
-                            decay_applied = result.decay_applied,
-                            embeddings_generated = result.embeddings_generated,
-                            duration_ms = result.duration_ms,
-                            "Auto-consolidation complete"
-                        );
-                    }
-                    Err(e) => {
-                        warn!("Auto-consolidation failed: {}", e);
-                    }
-                }
+                // Sleep until next check
+                tokio::time::sleep(std::time::Duration::from_secs(interval_hours * 3600)).await;
             }
         });
     }
@@ -222,8 +239,12 @@ async fn main() {
         });
     }
 
+    // Create cognitive engine (stateful neuroscience modules)
+    let cognitive = Arc::new(Mutex::new(cognitive::CognitiveEngine::new()));
+    info!("CognitiveEngine initialized (26 modules)");
+
     // Create MCP server
-    let server = McpServer::new(storage);
+    let server = McpServer::new(storage, cognitive);
 
     // Create stdio transport
     let transport = StdioTransport::new();

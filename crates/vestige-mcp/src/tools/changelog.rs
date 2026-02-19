@@ -44,6 +44,7 @@ pub fn schema() -> Value {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChangelogArgs {
+    #[serde(alias = "memory_id")]
     memory_id: Option<String>,
     #[allow(dead_code)]
     start: Option<String>,
@@ -188,4 +189,127 @@ fn execute_system_wide(
         "totalEvents": formatted_events.len(),
         "events": formatted_events,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
+        (Arc::new(Mutex::new(storage)), dir)
+    }
+
+    async fn ingest_test_memory(storage: &Arc<Mutex<Storage>>) -> String {
+        let mut s = storage.lock().await;
+        let node = s
+            .ingest(vestige_core::IngestInput {
+                content: "Changelog test memory".to_string(),
+                node_type: "fact".to_string(),
+                source: None,
+                sentiment_score: 0.0,
+                sentiment_magnitude: 0.0,
+                tags: vec![],
+                valid_from: None,
+                valid_until: None,
+            })
+            .unwrap();
+        node.id
+    }
+
+    #[test]
+    fn test_schema_has_properties() {
+        let s = schema();
+        assert_eq!(s["type"], "object");
+        assert!(s["properties"]["memory_id"].is_object());
+        assert!(s["properties"]["start"].is_object());
+        assert!(s["properties"]["end"].is_object());
+        assert!(s["properties"]["limit"].is_object());
+        assert_eq!(s["properties"]["limit"]["default"], 20);
+        assert_eq!(s["properties"]["limit"]["minimum"], 1);
+        assert_eq!(s["properties"]["limit"]["maximum"], 100);
+    }
+
+    #[tokio::test]
+    async fn test_changelog_no_args_system_wide() {
+        let (storage, _dir) = test_storage().await;
+        let result = execute(&storage, None).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["tool"], "memory_changelog");
+        assert_eq!(value["mode"], "system_wide");
+        assert!(value["events"].is_array());
+    }
+
+    #[tokio::test]
+    async fn test_changelog_system_wide_empty() {
+        let (storage, _dir) = test_storage().await;
+        let result = execute(&storage, None).await;
+        let value = result.unwrap();
+        assert_eq!(value["totalEvents"], 0);
+        assert!(value["events"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_changelog_per_memory_valid_id() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_test_memory(&storage).await;
+        let args = serde_json::json!({ "memory_id": id });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["tool"], "memory_changelog");
+        assert_eq!(value["mode"], "per_memory");
+        assert_eq!(value["memoryId"], id);
+        assert!(value["memoryContent"].is_string());
+        assert!(value["transitions"].is_array());
+    }
+
+    #[tokio::test]
+    async fn test_changelog_per_memory_invalid_uuid() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({ "memory_id": "not-a-uuid" });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid memory_id"));
+    }
+
+    #[tokio::test]
+    async fn test_changelog_per_memory_nonexistent() {
+        let (storage, _dir) = test_storage().await;
+        let args =
+            serde_json::json!({ "memory_id": "00000000-0000-0000-0000-000000000000" });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_changelog_limit_clamped() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({ "limit": 0 });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_ok()); // clamped to 1
+    }
+
+    #[tokio::test]
+    async fn test_changelog_limit_high_clamped() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({ "limit": 999 });
+        let result = execute(&storage, Some(args)).await;
+        assert!(result.is_ok()); // clamped to 100
+    }
+
+    #[tokio::test]
+    async fn test_changelog_per_memory_no_transitions() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_test_memory(&storage).await;
+        let args = serde_json::json!({ "memory_id": id });
+        let result = execute(&storage, Some(args)).await;
+        let value = result.unwrap();
+        assert_eq!(value["totalTransitions"], 0);
+        assert!(value["transitions"].as_array().unwrap().is_empty());
+    }
 }

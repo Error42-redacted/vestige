@@ -288,6 +288,15 @@ pub struct ConsolidationResult {
     pub duration_ms: i64,
     /// Number of embeddings generated
     pub embeddings_generated: i64,
+    // v1.4.0: FSRS-6 upgrade
+    /// Number of duplicate memories merged during episodic→semantic consolidation
+    pub duplicates_merged: i64,
+    /// Number of neighbor memories reinforced (tracked per-access, not consolidation)
+    pub neighbors_reinforced: i64,
+    /// Number of ACT-R activations computed from access history
+    pub activations_computed: i64,
+    /// Personalized w20 if optimized this cycle
+    pub w20_optimized: Option<f64>,
 }
 
 
