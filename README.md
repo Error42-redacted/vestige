@@ -108,27 +108,52 @@ This isn't a key-value store with an embedding model bolted on. Vestige implemen
 
 **Memory States** — Active, Dormant, Silent, Unavailable. Memories transition between states based on usage patterns, exactly like human cognitive architecture.
 
+**Memory Dreaming** *(v1.5.0)* — Like sleep consolidation. Replays recent memories to discover hidden connections, strengthen important patterns, and synthesize insights. Based on the [Active Dreaming Memory](https://engrxiv.org/preprint/download/5919/9826/8234) framework.
+
+**ACT-R Activation** *(v1.5.0)* — Retrieval strength depends on BOTH recency AND frequency of access, computed from full access history. A memory accessed 50 times over 3 weeks is stronger than one accessed once yesterday. Based on [Anderson, 1993](http://act-r.psy.cmu.edu/).
+
+**Automatic Consolidation** *(v1.5.0)* — FSRS-6 decay runs automatically every 6 hours + inline every 100 tool calls. Episodic memories auto-merge into semantic summaries. Cross-memory reinforcement strengthens neighbors on access. No manual maintenance needed.
+
 [Full science documentation →](docs/SCIENCE.md)
 
 ---
 
-## Tools
+## Tools — 23 MCP Tools
 
+### Core Memory
 | Tool | What It Does |
 |------|-------------|
-| `search` | Hybrid search — keyword + semantic + RRF fusion |
-| `smart_ingest` | Intelligent storage with automatic CREATE/UPDATE/SUPERSEDE |
-| `ingest` | Direct memory storage |
-| `memory` | Get, delete, or check memory state |
-| `codebase` | Remember patterns and architectural decisions |
-| `intention` | Set reminders and future triggers |
-| `session_checkpoint` | Batch-save an entire session's work |
-| `promote_memory` / `demote_memory` | Feedback loop — strengthen or weaken memories |
-| `find_duplicates` | Self-healing — detect and merge redundant memories |
-| `consolidate` | Run FSRS-6 decay and maintenance |
-| `importance_score` | 4-channel importance scoring (novelty, arousal, reward, attention) |
-| `memory_timeline` | Browse memories chronologically |
-| `health_check` | System health with warnings and recommendations |
+| `search` | 7-stage cognitive search — keyword + semantic + RRF fusion + reranking + temporal boost + competition + spreading activation |
+| `smart_ingest` | Intelligent storage with automatic CREATE/UPDATE/SUPERSEDE via Prediction Error Gating |
+| `ingest` | Direct memory storage with cognitive post-processing |
+| `memory` | Get, delete, or check memory accessibility state |
+| `codebase` | Remember code patterns and architectural decisions per-project |
+| `intention` | Prospective memory — "remind me to X when Y happens" |
+
+### Cognitive Engine (v1.5.0)
+| Tool | What It Does |
+|------|-------------|
+| `dream` | Memory consolidation via replay — discovers hidden connections, synthesizes insights |
+| `explore_connections` | Graph traversal — build reasoning chains, find associations via spreading activation, discover bridges between memories |
+| `predict` | Proactive retrieval — predicts what memories you'll need next based on context and activity patterns |
+| `restore` | Restore memories from JSON backup files |
+
+### Feedback & Scoring
+| Tool | What It Does |
+|------|-------------|
+| `promote_memory` / `demote_memory` | Feedback loop with full cognitive pipeline — reward signals, reconsolidation, competition |
+| `importance_score` | 4-channel neuroscience scoring (novelty, arousal, reward, attention) |
+
+### Auto-Save & Maintenance
+| Tool | What It Does |
+|------|-------------|
+| `session_checkpoint` | Batch-save up to 20 items in one call |
+| `find_duplicates` | Self-healing — detect and merge redundant memories via cosine similarity |
+| `consolidate` | Run FSRS-6 decay cycle (also runs automatically every 6 hours) |
+| `memory_timeline` | Browse memories chronologically, grouped by day |
+| `memory_changelog` | Audit trail of memory state transitions |
+| `health_check` / `stats` | System health, retention curves, cognitive state breakdown |
+| `backup` / `export` / `gc` | Database backup, JSON export, garbage collection |
 
 ---
 
@@ -171,7 +196,7 @@ vestige restore <file>     # Restore from backup
 
 ## Technical Details
 
-- **Language:** Rust (42,000 lines)
+- **Language:** Rust (46,000+ lines)
 - **Binary size:** ~20MB
 - **Embeddings:** Nomic Embed Text v1.5 (768-dim, local ONNX inference via fastembed)
 - **Vector search:** USearch HNSW (20x faster than FAISS)
