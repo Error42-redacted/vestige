@@ -127,12 +127,12 @@ async fn execute_remember_pattern(
     // Build content with structured format
     let mut content = format!("# Code Pattern: {}\n\n{}", name, description);
 
-    if let Some(ref files) = args.files {
-        if !files.is_empty() {
-            content.push_str("\n\n## Files:\n");
-            for f in files {
-                content.push_str(&format!("- {}\n", f));
-            }
+    if let Some(ref files) = args.files
+        && !files.is_empty()
+    {
+        content.push_str("\n\n## Files:\n");
+        for f in files {
+            content.push_str(&format!("- {}\n", f));
         }
     }
 
@@ -211,21 +211,21 @@ async fn execute_remember_decision(
         decision
     );
 
-    if let Some(ref alternatives) = args.alternatives {
-        if !alternatives.is_empty() {
-            content.push_str("\n\n## Alternatives Considered:\n");
-            for alt in alternatives {
-                content.push_str(&format!("- {}\n", alt));
-            }
+    if let Some(ref alternatives) = args.alternatives
+        && !alternatives.is_empty()
+    {
+        content.push_str("\n\n## Alternatives Considered:\n");
+        for alt in alternatives {
+            content.push_str(&format!("- {}\n", alt));
         }
     }
 
-    if let Some(ref files) = args.files {
-        if !files.is_empty() {
-            content.push_str("\n\n## Affected Files:\n");
-            for f in files {
-                content.push_str(&format!("- {}\n", f));
-            }
+    if let Some(ref files) = args.files
+        && !files.is_empty()
+    {
+        content.push_str("\n\n## Affected Files:\n");
+        for f in files {
+            content.push_str(&format!("- {}\n", f));
         }
     }
 
@@ -336,23 +336,23 @@ async fn execute_get_context(
     // COGNITIVE: Cross-project knowledge discovery
     // ====================================================================
     let mut universal_patterns = Vec::new();
-    if let Some(codebase_name) = &args.codebase {
-        if let Ok(cog) = cognitive.try_lock() {
-            let context = vestige_core::advanced::cross_project::ProjectContext {
-                path: None,
-                name: Some(codebase_name.clone()),
-                languages: Vec::new(),
-                frameworks: Vec::new(),
-                file_types: std::collections::HashSet::new(),
-                dependencies: Vec::new(),
-                structure: Vec::new(),
-            };
-            let applicable = cog.cross_project.detect_applicable(&context);
-            for knowledge in applicable {
-                universal_patterns.push(serde_json::json!({
-                    "pattern": format!("{:?}", knowledge),
-                }));
-            }
+    if let Some(codebase_name) = &args.codebase
+        && let Ok(cog) = cognitive.try_lock()
+    {
+        let context = vestige_core::advanced::cross_project::ProjectContext {
+            path: None,
+            name: Some(codebase_name.clone()),
+            languages: Vec::new(),
+            frameworks: Vec::new(),
+            file_types: std::collections::HashSet::new(),
+            dependencies: Vec::new(),
+            structure: Vec::new(),
+        };
+        let applicable = cog.cross_project.detect_applicable(&context);
+        for knowledge in applicable {
+            universal_patterns.push(serde_json::json!({
+                "pattern": format!("{:?}", knowledge),
+            }));
         }
     }
 

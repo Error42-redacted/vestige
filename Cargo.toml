@@ -5,6 +5,9 @@ members = [
     "crates/vestige-mcp",
     "tests/e2e",
 ]
+exclude = [
+    "fastembed-rs",
+]
 
 [workspace.package]
 version = "1.6.0"

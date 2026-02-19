@@ -1049,7 +1049,9 @@ impl IntentionParser {
 
     /// Extract content from text, removing trigger keywords
     fn extract_content(&self, _text_lower: &str, original: &str, keyword: &str) -> String {
-        let content = original
+        
+
+        original
             .replace(keyword, "")
             .replace(&keyword.to_uppercase(), "")
             .replace("remind me to ", "")
@@ -1057,9 +1059,7 @@ impl IntentionParser {
             .replace("remind me ", "")
             .replace("Remind me ", "")
             .trim()
-            .to_string();
-
-        content
+            .to_string()
     }
 
     /// Extract entity names from text

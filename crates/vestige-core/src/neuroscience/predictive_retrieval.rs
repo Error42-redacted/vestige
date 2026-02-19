@@ -738,6 +738,7 @@ impl Default for PredictiveMemoryConfig {
 }
 
 /// The main predictive memory engine
+#[allow(clippy::type_complexity)]
 pub struct PredictiveMemory {
     /// User behavior model
     user_model: Arc<RwLock<UserModel>>,

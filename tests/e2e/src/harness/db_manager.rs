@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 /// Helper to create IngestInput (works around non_exhaustive)
+#[allow(clippy::too_many_arguments)]
 fn make_ingest_input(
     content: String,
     node_type: String,
@@ -21,16 +22,16 @@ fn make_ingest_input(
     valid_from: Option<chrono::DateTime<chrono::Utc>>,
     valid_until: Option<chrono::DateTime<chrono::Utc>>,
 ) -> vestige_core::IngestInput {
-    let mut input = vestige_core::IngestInput::default();
-    input.content = content;
-    input.node_type = node_type;
-    input.tags = tags;
-    input.sentiment_score = sentiment_score;
-    input.sentiment_magnitude = sentiment_magnitude;
-    input.source = source;
-    input.valid_from = valid_from;
-    input.valid_until = valid_until;
-    input
+    vestige_core::IngestInput {
+        content,
+        node_type,
+        tags,
+        sentiment_score,
+        sentiment_magnitude,
+        source,
+        valid_from,
+        valid_until,
+    }
 }
 
 /// Manager for test databases

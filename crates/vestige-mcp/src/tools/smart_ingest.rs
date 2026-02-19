@@ -170,7 +170,7 @@ pub async fn execute(
         // Post-ingest cognitive side effects
         run_post_ingest(cognitive, &node_id, &node_content, &node_type, importance_composite);
 
-        return Ok(serde_json::json!({
+        Ok(serde_json::json!({
             "success": true,
             "decision": result.decision,
             "nodeId": node_id,
@@ -191,7 +191,7 @@ pub async fn execute(
                 "add_context" => "Added new content as context to existing memory",
                 _ => "Memory processed successfully"
             }
-        }));
+        }))
     }
 
     #[cfg(not(all(feature = "embeddings", feature = "vector-search")))]

@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Feedback Tools
 //!
 //! Promote and demote memories based on outcome quality.

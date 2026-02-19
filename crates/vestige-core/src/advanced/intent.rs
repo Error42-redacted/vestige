@@ -402,6 +402,7 @@ pub struct IntentDetector {
 }
 
 /// A pattern that suggests a specific intent
+#[allow(clippy::type_complexity)]
 struct IntentPattern {
     /// Name of the pattern
     name: String,

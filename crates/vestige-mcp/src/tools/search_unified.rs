@@ -226,19 +226,19 @@ pub async fn execute(
     // ====================================================================
     // STAGE 5: Context matching (Tulving 1973 encoding specificity)
     // ====================================================================
-    if let Some(ref topics) = args.context_topics {
-        if !topics.is_empty() {
-            let retrieval_ctx = EncodingContext::new()
-                .with_topical(TopicalContext::with_topics(topics.clone()));
-            if let Ok(cog) = cognitive.try_lock() {
-                for result in &mut filtered_results {
-                    // Build encoding context from memory's tags
-                    let encoding_ctx = EncodingContext::new()
-                        .with_topical(TopicalContext::with_topics(result.node.tags.clone()));
-                    let context_score = cog.context_matcher.match_contexts(&encoding_ctx, &retrieval_ctx);
-                    // Blend: context match boosts relevance up to +30%
-                    result.combined_score *= 1.0 + (context_score as f32 * 0.3);
-                }
+    if let Some(ref topics) = args.context_topics
+        && !topics.is_empty()
+    {
+        let retrieval_ctx = EncodingContext::new()
+            .with_topical(TopicalContext::with_topics(topics.clone()));
+        if let Ok(cog) = cognitive.try_lock() {
+            for result in &mut filtered_results {
+                // Build encoding context from memory's tags
+                let encoding_ctx = EncodingContext::new()
+                    .with_topical(TopicalContext::with_topics(result.node.tags.clone()));
+                let context_score = cog.context_matcher.match_contexts(&encoding_ctx, &retrieval_ctx);
+                // Blend: context match boosts relevance up to +30%
+                result.combined_score *= 1.0 + (context_score as f32 * 0.3);
             }
         }
     }
@@ -270,23 +270,23 @@ pub async fn execute(
     // STAGE 5B: Retrieval competition (Anderson et al. 1994)
     // ====================================================================
     let mut suppressed_count = 0_usize;
-    if filtered_results.len() > 1 {
-        if let Ok(mut cog) = cognitive.try_lock() {
-            let candidates: Vec<CompetitionCandidate> = filtered_results
-                .iter()
-                .map(|r| CompetitionCandidate {
-                    memory_id: r.node.id.clone(),
-                    relevance_score: r.combined_score as f64,
-                    similarity_to_query: r.semantic_score.unwrap_or(0.0) as f64,
-                })
-                .collect();
-            if let Some(result) = cog.competition_mgr.run_competition(&candidates, 0.7) {
-                // Apply suppression: losers get penalized
-                for suppressed_id in &result.suppressed_ids {
-                    if let Some(r) = filtered_results.iter_mut().find(|r| &r.node.id == suppressed_id) {
-                        r.combined_score *= 0.85; // 15% suppression penalty
-                        suppressed_count += 1;
-                    }
+    if filtered_results.len() > 1
+        && let Ok(mut cog) = cognitive.try_lock()
+    {
+        let candidates: Vec<CompetitionCandidate> = filtered_results
+            .iter()
+            .map(|r| CompetitionCandidate {
+                memory_id: r.node.id.clone(),
+                relevance_score: r.combined_score as f64,
+                similarity_to_query: r.semantic_score.unwrap_or(0.0) as f64,
+            })
+            .collect();
+        if let Some(result) = cog.competition_mgr.run_competition(&candidates, 0.7) {
+            // Apply suppression: losers get penalized
+            for suppressed_id in &result.suppressed_ids {
+                if let Some(r) = filtered_results.iter_mut().find(|r| &r.node.id == suppressed_id) {
+                    r.combined_score *= 0.85; // 15% suppression penalty
+                    suppressed_count += 1;
                 }
             }
         }

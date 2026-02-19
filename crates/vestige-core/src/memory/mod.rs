@@ -216,8 +216,8 @@ impl KnowledgeEdge {
 
     /// Check if the edge was valid at a given time
     pub fn was_valid_at(&self, time: DateTime<Utc>) -> bool {
-        let after_start = self.valid_from.map_or(true, |from| time >= from);
-        let before_end = self.valid_until.map_or(true, |until| time < until);
+        let after_start = self.valid_from.is_none_or(|from| time >= from);
+        let before_end = self.valid_until.is_none_or(|until| time < until);
         after_start && before_end
     }
 }

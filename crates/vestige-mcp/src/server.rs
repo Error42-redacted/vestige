@@ -87,7 +87,7 @@ impl McpServer {
 
         // Version negotiation: use client's version if older than server's
         // Claude Desktop rejects servers with newer protocol versions
-        let negotiated_version = if request.protocol_version < MCP_VERSION.to_string() {
+        let negotiated_version = if request.protocol_version.as_str() < MCP_VERSION {
             info!("Client requested older protocol version {}, using it", request.protocol_version);
             request.protocol_version.clone()
         } else {
@@ -593,7 +593,7 @@ impl McpServer {
         let should_consolidate = self.cognitive.try_lock()
             .ok()
             .map(|cog| cog.consolidation_scheduler.should_consolidate())
-            .unwrap_or(count % 100 == 0); // Fallback to count-based if lock unavailable
+            .unwrap_or(count.is_multiple_of(100)); // Fallback to count-based if lock unavailable
 
         if should_consolidate {
             let storage_clone = Arc::clone(&self.storage);

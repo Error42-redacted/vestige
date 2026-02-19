@@ -257,38 +257,38 @@ async fn execute_set(
 
     if let Ok(cog) = cognitive.try_lock() {
         // 8A. Try NLP parsing when no explicit trigger is provided
-        if args.trigger.is_none() {
-            if let Ok(parsed) = cog.intention_parser.parse(description) {
-                nlp_parsed = true;
-                // Extract trigger info from parsed intention
-                let (t_type, t_data) = match &parsed.trigger {
-                    ProspectiveTrigger::TimeBased { .. } => {
-                        ("time".to_string(), serde_json::json!({"type": "time"}).to_string())
-                    }
-                    ProspectiveTrigger::DurationBased { after, .. } => {
-                        let mins = after.num_minutes();
-                        ("time".to_string(), serde_json::json!({"type": "time", "in_minutes": mins}).to_string())
-                    }
-                    ProspectiveTrigger::EventBased { condition, .. } => {
-                        ("event".to_string(), serde_json::json!({"type": "event", "condition": condition}).to_string())
-                    }
-                    ProspectiveTrigger::ContextBased { context_match } => {
-                        ("context".to_string(), serde_json::json!({"type": "context", "topic": format!("{:?}", context_match)}).to_string())
-                    }
-                    ProspectiveTrigger::Recurring { .. } => {
-                        ("recurring".to_string(), serde_json::json!({"type": "recurring"}).to_string())
-                    }
-                    _ => {
-                        ("event".to_string(), serde_json::json!({"type": "event"}).to_string())
-                    }
-                };
-                nlp_trigger_type = Some(t_type);
-                nlp_trigger_data = Some(t_data);
-
-                // Use NLP-detected priority if user didn't specify one
-                if args.priority.is_none() {
-                    nlp_priority = Some(parsed.priority);
+        if args.trigger.is_none()
+            && let Ok(parsed) = cog.intention_parser.parse(description)
+        {
+            nlp_parsed = true;
+            // Extract trigger info from parsed intention
+            let (t_type, t_data) = match &parsed.trigger {
+                ProspectiveTrigger::TimeBased { .. } => {
+                    ("time".to_string(), serde_json::json!({"type": "time"}).to_string())
                 }
+                ProspectiveTrigger::DurationBased { after, .. } => {
+                    let mins = after.num_minutes();
+                    ("time".to_string(), serde_json::json!({"type": "time", "in_minutes": mins}).to_string())
+                }
+                ProspectiveTrigger::EventBased { condition, .. } => {
+                    ("event".to_string(), serde_json::json!({"type": "event", "condition": condition}).to_string())
+                }
+                ProspectiveTrigger::ContextBased { context_match } => {
+                    ("context".to_string(), serde_json::json!({"type": "context", "topic": format!("{:?}", context_match)}).to_string())
+                }
+                ProspectiveTrigger::Recurring { .. } => {
+                    ("recurring".to_string(), serde_json::json!({"type": "recurring"}).to_string())
+                }
+                _ => {
+                    ("event".to_string(), serde_json::json!({"type": "event"}).to_string())
+                }
+            };
+            nlp_trigger_type = Some(t_type);
+            nlp_trigger_data = Some(t_data);
+
+            // Use NLP-detected priority if user didn't specify one
+            if args.priority.is_none() {
+                nlp_priority = Some(parsed.priority);
             }
         }
 
@@ -355,10 +355,8 @@ async fn execute_set(
             DateTime::parse_from_rfc3339(at)
                 .ok()
                 .map(|dt| dt.with_timezone(&Utc))
-        } else if let Some(mins) = trigger.in_minutes {
-            Some(now + Duration::minutes(mins))
         } else {
-            None
+            trigger.in_minutes.map(|mins| now + Duration::minutes(mins))
         }
     } else {
         None
@@ -410,21 +408,21 @@ async fn execute_check(
     // ====================================================================
     // COGNITIVE: Update prospective memory context
     // ====================================================================
-    if let Some(ctx) = &args.context {
-        if let Ok(cog) = cognitive.try_lock() {
-            let mut prospective_ctx = ProspectiveContext::new();
-            if let Some(codebase) = &ctx.codebase {
-                prospective_ctx.project_name = Some(codebase.clone());
-            }
-            if let Some(file) = &ctx.file {
-                prospective_ctx.active_files = vec![file.clone()];
-            }
-            if let Some(topics) = &ctx.topics {
-                prospective_ctx.active_topics = topics.clone();
-            }
-            // Update context on prospective memory (triggers internal monitoring)
-            let _ = cog.prospective_memory.update_context(prospective_ctx);
+    if let Some(ctx) = &args.context
+        && let Ok(cog) = cognitive.try_lock()
+    {
+        let mut prospective_ctx = ProspectiveContext::new();
+        if let Some(codebase) = &ctx.codebase {
+            prospective_ctx.project_name = Some(codebase.clone());
         }
+        if let Some(file) = &ctx.file {
+            prospective_ctx.active_files = vec![file.clone()];
+        }
+        if let Some(topics) = &ctx.topics {
+            prospective_ctx.active_topics = topics.clone();
+        }
+        // Update context on prospective memory (triggers internal monitoring)
+        let _ = cog.prospective_memory.update_context(prospective_ctx);
     }
 
     let storage = storage.lock().await;

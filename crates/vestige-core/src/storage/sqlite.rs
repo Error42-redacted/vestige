@@ -1890,7 +1890,7 @@ impl Storage {
         let all_embeddings = self.get_all_embeddings()?;
         let n = all_embeddings.len();
 
-        if n < 2 || n > 2000 {
+        if !(2..=2000).contains(&n) {
             return Ok(0);
         }
 

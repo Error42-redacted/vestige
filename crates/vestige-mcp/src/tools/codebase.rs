@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Codebase Tools (Deprecated - use codebase_unified instead)
 //!
 //! Remember patterns, decisions, and context about codebases.
@@ -131,12 +130,12 @@ pub async fn execute_pattern(
     // Build content with structured format
     let mut content = format!("# Code Pattern: {}\n\n{}", args.name, args.description);
 
-    if let Some(ref files) = args.files {
-        if !files.is_empty() {
-            content.push_str("\n\n## Files:\n");
-            for f in files {
-                content.push_str(&format!("- {}\n", f));
-            }
+    if let Some(ref files) = args.files
+        && !files.is_empty()
+    {
+        content.push_str("\n\n## Files:\n");
+        for f in files {
+            content.push_str(&format!("- {}\n", f));
         }
     }
 
@@ -189,21 +188,21 @@ pub async fn execute_decision(
         args.decision
     );
 
-    if let Some(ref alternatives) = args.alternatives {
-        if !alternatives.is_empty() {
-            content.push_str("\n\n## Alternatives Considered:\n");
-            for alt in alternatives {
-                content.push_str(&format!("- {}\n", alt));
-            }
+    if let Some(ref alternatives) = args.alternatives
+        && !alternatives.is_empty()
+    {
+        content.push_str("\n\n## Alternatives Considered:\n");
+        for alt in alternatives {
+            content.push_str(&format!("- {}\n", alt));
         }
     }
 
-    if let Some(ref files) = args.files {
-        if !files.is_empty() {
-            content.push_str("\n\n## Affected Files:\n");
-            for f in files {
-                content.push_str(&format!("- {}\n", f));
-            }
+    if let Some(ref files) = args.files
+        && !files.is_empty()
+    {
+        content.push_str("\n\n## Affected Files:\n");
+        for f in files {
+            content.push_str(&format!("- {}\n", f));
         }
     }
 
@@ -239,7 +238,7 @@ pub async fn execute_context(
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: ContextArgs = args
-        .map(|v| serde_json::from_value(v))
+        .map(serde_json::from_value)
         .transpose()
         .map_err(|e| format!("Invalid arguments: {}", e))?
         .unwrap_or(ContextArgs {

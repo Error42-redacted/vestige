@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Stats Tools (Deprecated - use memory_unified instead)
 //!
 //! Memory statistics and health check.

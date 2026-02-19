@@ -9,6 +9,15 @@
 
 > Your AI forgets everything between sessions. Vestige fixes that. Built on 130 years of memory research — FSRS-6 spaced repetition, prediction error gating, synaptic tagging — all running in a single Rust binary, 100% local.
 
+### What's New in v1.6.0
+
+- **6x vector storage reduction** — F16 quantization + Matryoshka 256-dim truncation
+- **Neural reranking** — Jina cross-encoder reranker for ~20% better retrieval
+- **Instant startup** — cross-encoder loads in background, zero blocking
+- **Auto-migration** — old 768-dim embeddings seamlessly upgraded
+
+See [CHANGELOG](CHANGELOG.md) for full version history.
+
 ---
 
 ## Give Your AI a Brain in 30 Seconds
@@ -196,7 +205,7 @@ vestige restore <file>     # Restore from backup
 
 ## Technical Details
 
-- **Language:** Rust (46,000+ lines)
+- **Language:** Rust (52,000+ lines, 1,100+ tests)
 - **Binary size:** ~20MB
 - **Embeddings:** Nomic Embed Text v1.5 (768-dim, local ONNX inference via fastembed)
 - **Vector search:** USearch HNSW (20x faster than FAISS)

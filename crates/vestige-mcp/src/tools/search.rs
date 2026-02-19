@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Search Tools (Deprecated - use search_unified instead)
 //!
 //! Semantic and hybrid search implementations.

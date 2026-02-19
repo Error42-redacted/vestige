@@ -561,11 +561,10 @@ fn run_backup(output: PathBuf) -> anyhow::Result<()> {
     }
 
     // Create parent directories if needed
-    if let Some(parent) = output.parent() {
-        if !parent.exists() {
+    if let Some(parent) = output.parent()
+        && !parent.exists() {
             std::fs::create_dir_all(parent)?;
         }
-    }
 
     // Copy the database file
     println!("Copying database...");
@@ -638,11 +637,10 @@ fn run_export(
         .iter()
         .filter(|node| {
             // Date filter
-            if let Some(ref since_dt) = since_date {
-                if node.created_at < *since_dt {
+            if let Some(ref since_dt) = since_date
+                && node.created_at < *since_dt {
                     return false;
                 }
-            }
             // Tag filter: node must contain ALL specified tags
             if !tag_filter.is_empty() {
                 for tag in &tag_filter {
@@ -671,11 +669,10 @@ fn run_export(
     println!();
 
     // Create parent directories if needed
-    if let Some(parent) = output.parent() {
-        if !parent.exists() {
+    if let Some(parent) = output.parent()
+        && !parent.exists() {
             std::fs::create_dir_all(parent)?;
         }
-    }
 
     let file = std::fs::File::create(&output)?;
     let mut writer = BufWriter::new(file);

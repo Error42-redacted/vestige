@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Intentions Tools (Deprecated - use intention_unified instead)
 //!
 //! Prospective memory tools for setting and checking future intentions.
@@ -264,10 +263,8 @@ pub async fn execute_set(
     let trigger_at = if let Some(trigger) = &args.trigger {
         if let Some(at) = &trigger.at {
             DateTime::parse_from_rfc3339(at).ok().map(|dt| dt.with_timezone(&Utc))
-        } else if let Some(mins) = trigger.in_minutes {
-            Some(now + Duration::minutes(mins))
         } else {
-            None
+            trigger.in_minutes.map(|mins| now + Duration::minutes(mins))
         }
     } else {
         None

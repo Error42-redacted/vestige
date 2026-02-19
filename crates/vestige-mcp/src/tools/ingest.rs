@@ -140,7 +140,7 @@ pub async fn execute(
 
                 run_post_ingest(cognitive, &node_id, &node_content, &node_type, importance_composite);
 
-                return Ok(serde_json::json!({
+                Ok(serde_json::json!({
                     "success": true,
                     "nodeId": node_id,
                     "decision": result.decision,
@@ -150,7 +150,7 @@ pub async fn execute(
                     "reason": result.reason,
                     "isNovel": is_novel,
                     "embeddingStrategy": embedding_strategy,
-                }));
+                }))
             }
             Err(_) => {
                 let node = storage_guard.ingest(fallback_input).map_err(|e| e.to_string())?;
@@ -162,7 +162,7 @@ pub async fn execute(
 
                 run_post_ingest(cognitive, &node_id, &node_content, &node_type, importance_composite);
 
-                return Ok(serde_json::json!({
+                Ok(serde_json::json!({
                     "success": true,
                     "nodeId": node_id,
                     "decision": "create",
@@ -170,7 +170,7 @@ pub async fn execute(
                     "hasEmbedding": has_embedding,
                     "isNovel": is_novel,
                     "embeddingStrategy": embedding_strategy,
-                }));
+                }))
             }
         }
     }

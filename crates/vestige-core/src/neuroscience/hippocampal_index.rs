@@ -1691,6 +1691,7 @@ impl HippocampalIndex {
     }
 
     /// Recursively collect associations
+    #[allow(clippy::only_used_in_recursion)]
     fn collect_associations(
         &self,
         indices: &HashMap<String, MemoryIndex>,
@@ -1874,6 +1875,7 @@ pub struct MigrationResult {
 
 impl HippocampalIndex {
     /// Migrate a KnowledgeNode to indexed format
+    #[allow(clippy::too_many_arguments)]
     pub fn migrate_node(
         &self,
         node_id: &str,

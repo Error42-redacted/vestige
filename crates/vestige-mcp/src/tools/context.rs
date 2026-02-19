@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Context-Dependent Memory Tool (Deprecated)
 //!
 //! Retrieval based on encoding context match.

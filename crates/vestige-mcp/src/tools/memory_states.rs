@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Memory States Tool (Deprecated - use memory_unified instead)
 //!
 //! Query and manage memory states (Active, Dormant, Silent, Unavailable).

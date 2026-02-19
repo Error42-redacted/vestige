@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Knowledge Tools (Deprecated - use memory_unified instead)
 //!
 //! Get and delete specific knowledge nodes.

@@ -175,7 +175,7 @@ pub async fn execute(
 
         for i in 0..n {
             for j in (i + 1)..n {
-                let sim = cosine_similarity(&filtered_embeddings[i].2, &filtered_embeddings[j].2);
+                let sim = cosine_similarity(filtered_embeddings[i].2, filtered_embeddings[j].2);
                 if sim >= threshold {
                     uf.union(i, j);
                     similarities.push((i, j, sim));
@@ -195,7 +195,7 @@ pub async fn execute(
             .into_values()
             .filter(|c| c.len() > 1)
             .collect();
-        clusters.sort_by(|a, b| b.len().cmp(&a.len()));
+        clusters.sort_by_key(|b| std::cmp::Reverse(b.len()));
         clusters.truncate(limit);
 
         // Build similarity lookup for formatting
