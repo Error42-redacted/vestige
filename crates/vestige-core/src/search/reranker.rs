@@ -1,14 +1,17 @@
 //! Memory Reranking Module
 //!
-//! ## GOD TIER 2026: Two-Stage Retrieval
+//! ## Two-Stage Retrieval with Cross-Encoder
 //!
-//! Uses fastembed's reranking model to improve precision:
-//! 1. Stage 1: Retrieve top-50 candidates (fast, high recall)
-//! 2. Stage 2: Rerank to find best top-10 (slower, high precision)
+//! Uses fastembed's Jina Reranker v1 Turbo (38M params) cross-encoder
+//! for high-precision reranking:
+//! 1. Stage 1: Retrieve top-50 candidates via hybrid search (fast, high recall)
+//! 2. Stage 2: Cross-encoder rerank to find best top-10 (slower, high precision)
 //!
-//! This gives +15-20% retrieval precision on complex queries.
+//! Falls back to BM25-like term overlap scoring when the cross-encoder
+//! model is unavailable.
 
-// Note: Mutex and OnceLock are reserved for future cross-encoder model implementation
+#[cfg(feature = "embeddings")]
+use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 
 // ============================================================================
 // CONSTANTS
@@ -83,21 +86,15 @@ impl Default for RerankerConfig {
     }
 }
 
-/// Service for reranking search results
+/// Service for reranking search results using a cross-encoder model
 ///
-/// ## Usage
-///
-/// ```rust,ignore
-/// let reranker = Reranker::new(RerankerConfig::default());
-///
-/// // Get initial candidates (fast, recall-focused)
-/// let candidates = storage.hybrid_search(query, 50)?;
-///
-/// // Rerank for precision
-/// let reranked = reranker.rerank(query, candidates, 10)?;
-/// ```
+/// When the `embeddings` feature is enabled and `init_cross_encoder()` is called,
+/// uses Jina Reranker v1 Turbo for neural cross-encoder scoring.
+/// Falls back to BM25-like term overlap when the model is unavailable.
 pub struct Reranker {
     config: RerankerConfig,
+    #[cfg(feature = "embeddings")]
+    cross_encoder: Option<TextRerank>,
 }
 
 impl Default for Reranker {
@@ -108,24 +105,61 @@ impl Default for Reranker {
 
 impl Reranker {
     /// Create a new reranker with the given configuration
+    ///
+    /// The cross-encoder model is NOT loaded here — call `init_cross_encoder()`
+    /// explicitly to load it. This keeps construction fast and test-friendly.
     pub fn new(config: RerankerConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            #[cfg(feature = "embeddings")]
+            cross_encoder: None,
+        }
+    }
+
+    /// Initialize the cross-encoder model (Jina Reranker v1 Turbo, ~150MB)
+    ///
+    /// Downloads the model on first call. Call this during server startup,
+    /// NOT in tests or hot paths.
+    #[cfg(feature = "embeddings")]
+    pub fn init_cross_encoder(&mut self) {
+        if self.cross_encoder.is_some() {
+            return; // Already initialized
+        }
+
+        let options = RerankInitOptions::new(RerankerModel::JINARerankerV1TurboEn)
+            .with_show_download_progress(true);
+
+        match TextRerank::try_new(options) {
+            Ok(model) => {
+                eprintln!("[vestige] Cross-encoder reranker loaded (Jina Reranker v1 Turbo)");
+                self.cross_encoder = Some(model);
+            }
+            Err(e) => {
+                eprintln!("[vestige] Cross-encoder unavailable, using BM25 fallback: {e}");
+            }
+        }
+    }
+
+    /// Check if the cross-encoder model is available
+    pub fn has_cross_encoder(&self) -> bool {
+        #[cfg(feature = "embeddings")]
+        {
+            self.cross_encoder.is_some()
+        }
+        #[cfg(not(feature = "embeddings"))]
+        {
+            false
+        }
     }
 
     /// Rerank candidates based on relevance to the query
     ///
-    /// This uses a cross-encoder model for more accurate relevance scoring
-    /// than the initial bi-encoder embedding similarity.
-    ///
-    /// ## Algorithm
-    ///
-    /// 1. Score each (query, candidate) pair using cross-encoder
-    /// 2. Sort by score descending
-    /// 3. Return top-k results
+    /// Uses cross-encoder model when available for neural relevance scoring.
+    /// Falls back to BM25-like term overlap scoring otherwise.
     pub fn rerank<T: Clone>(
-        &self,
+        &mut self,
         query: &str,
-        candidates: Vec<(T, String)>, // (item, text content)
+        candidates: Vec<(T, String)>,
         top_k: Option<usize>,
     ) -> Result<Vec<RerankedResult<T>>, RerankerError> {
         if query.is_empty() {
@@ -138,15 +172,43 @@ impl Reranker {
 
         let limit = top_k.unwrap_or(self.config.result_count);
 
-        // For now, use a simplified scoring approach based on text similarity
-        // In a full implementation, this would use fastembed's RerankerModel
-        // when it becomes available in the public API
+        // Try cross-encoder first
+        #[cfg(feature = "embeddings")]
+        if let Some(ref mut model) = self.cross_encoder {
+            let documents: Vec<&str> = candidates.iter().map(|(_, text)| text.as_str()).collect();
+
+            if let Ok(rerank_results) = model.rerank(query, &documents, false, None) {
+                let mut results: Vec<RerankedResult<T>> = rerank_results
+                    .into_iter()
+                    .filter_map(|rr| {
+                        candidates.get(rr.index).map(|(item, _)| RerankedResult {
+                            item: item.clone(),
+                            score: rr.score,
+                            original_rank: rr.index,
+                        })
+                    })
+                    .collect();
+
+                results.sort_by(|a, b| {
+                    b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                if let Some(min_score) = self.config.min_score {
+                    results.retain(|r| r.score >= min_score);
+                }
+
+                results.truncate(limit);
+                return Ok(results);
+            }
+            // Cross-encoder failed on this call — fall through to BM25 fallback
+        }
+
+        // Fallback: BM25-like scoring
         let mut results: Vec<RerankedResult<T>> = candidates
             .into_iter()
             .enumerate()
             .map(|(rank, (item, text))| {
-                // Simple BM25-like scoring based on term overlap
-                let score = self.compute_relevance_score(query, &text);
+                let score = Self::compute_relevance_score(query, &text);
                 RerankedResult {
                     item,
                     score,
@@ -155,25 +217,19 @@ impl Reranker {
             })
             .collect();
 
-        // Sort by score descending
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Apply minimum score filter
         if let Some(min_score) = self.config.min_score {
             results.retain(|r| r.score >= min_score);
         }
 
-        // Take top-k
         results.truncate(limit);
 
         Ok(results)
     }
 
-    /// Compute relevance score between query and document
-    ///
-    /// This is a simplified BM25-inspired scoring function.
-    /// A full implementation would use a cross-encoder model.
-    fn compute_relevance_score(&self, query: &str, document: &str) -> f32 {
+    /// BM25-inspired term overlap scoring (fallback when cross-encoder unavailable)
+    fn compute_relevance_score(query: &str, document: &str) -> f32 {
         let query_lower = query.to_lowercase();
         let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
         let doc_lower = document.to_lowercase();
@@ -184,22 +240,19 @@ impl Reranker {
         }
 
         let mut score = 0.0;
-        let k1 = 1.2_f32; // BM25 parameter
-        let b = 0.75_f32; // BM25 parameter
-        let avg_doc_len = 500.0_f32; // Assumed average document length
+        let k1 = 1.2_f32;
+        let b = 0.75_f32;
+        let avg_doc_len = 500.0_f32;
 
         for term in &query_terms {
-            // Count term frequency
             let tf = doc_lower.matches(term).count() as f32;
             if tf > 0.0 {
-                // BM25-like term frequency saturation
                 let numerator = tf * (k1 + 1.0);
                 let denominator = tf + k1 * (1.0 - b + b * (doc_len / avg_doc_len));
                 score += numerator / denominator;
             }
         }
 
-        // Normalize by query length
         if !query_terms.is_empty() {
             score /= query_terms.len() as f32;
         }
@@ -223,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_rerank_basic() {
-        let reranker = Reranker::default();
+        let mut reranker = Reranker::default();
 
         let candidates = vec![
             (1, "The quick brown fox".to_string()),
@@ -234,13 +287,12 @@ mod tests {
         let results = reranker.rerank("fox", candidates, Some(2)).unwrap();
 
         assert_eq!(results.len(), 2);
-        // Results with "fox" should be ranked higher
         assert!(results[0].item == 1 || results[0].item == 3);
     }
 
     #[test]
     fn test_rerank_empty_candidates() {
-        let reranker = Reranker::default();
+        let mut reranker = Reranker::default();
         let candidates: Vec<(i32, String)> = vec![];
 
         let results = reranker.rerank("query", candidates, Some(5)).unwrap();
@@ -249,7 +301,7 @@ mod tests {
 
     #[test]
     fn test_rerank_empty_query() {
-        let reranker = Reranker::default();
+        let mut reranker = Reranker::default();
         let candidates = vec![(1, "some text".to_string())];
 
         let result = reranker.rerank("", candidates, Some(5));
@@ -258,22 +310,28 @@ mod tests {
 
     #[test]
     fn test_min_score_filter() {
-        let reranker = Reranker::new(RerankerConfig {
+        let mut reranker = Reranker::new(RerankerConfig {
             min_score: Some(0.5),
             ..Default::default()
         });
 
         let candidates = vec![
-            (1, "fox fox fox".to_string()),  // High relevance
-            (2, "completely unrelated".to_string()),  // Low relevance
+            (1, "fox fox fox".to_string()),
+            (2, "completely unrelated".to_string()),
         ];
 
         let results = reranker.rerank("fox", candidates, None).unwrap();
 
-        // Only high-relevance results should pass the filter
         assert!(results.len() <= 2);
         if !results.is_empty() {
             assert!(results[0].score >= 0.5);
         }
+    }
+
+    #[test]
+    fn test_default_has_no_cross_encoder() {
+        let reranker = Reranker::default();
+        // Default constructor does NOT load the model — fast and test-friendly
+        assert!(!reranker.has_cross_encoder());
     }
 }

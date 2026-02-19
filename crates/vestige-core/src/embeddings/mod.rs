@@ -14,8 +14,8 @@ mod hybrid;
 mod local;
 
 pub use local::{
-    cosine_similarity, dot_product, euclidean_distance, Embedding, EmbeddingError,
-    EmbeddingService, BATCH_SIZE, EMBEDDING_DIMENSIONS, MAX_TEXT_LENGTH,
+    cosine_similarity, dot_product, euclidean_distance, matryoshka_truncate, Embedding,
+    EmbeddingError, EmbeddingService, BATCH_SIZE, EMBEDDING_DIMENSIONS, MAX_TEXT_LENGTH,
 };
 
 pub use code::CodeEmbedding;

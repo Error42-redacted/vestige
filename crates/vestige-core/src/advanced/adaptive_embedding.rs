@@ -31,13 +31,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Default embedding dimensions (BGE-base-en-v1.5: 768d, upgraded from MiniLM 384d)
-/// 2026 GOD TIER UPGRADE: +30% retrieval accuracy
-pub const DEFAULT_DIMENSIONS: usize = 768;
+/// Default embedding dimensions after Matryoshka truncation (768 → 256)
+pub const DEFAULT_DIMENSIONS: usize = 256;
 
-/// Code embedding dimensions (when using code-specific models)
-/// Now matches default since we upgraded to 768d
-pub const CODE_DIMENSIONS: usize = 768;
+/// Code embedding dimensions (matches default after Matryoshka truncation)
+pub const CODE_DIMENSIONS: usize = 256;
 
 /// Supported programming languages for code embeddings
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]

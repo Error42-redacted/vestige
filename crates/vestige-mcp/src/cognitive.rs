@@ -64,7 +64,7 @@ pub struct CognitiveEngine {
 impl CognitiveEngine {
     /// Initialize all cognitive modules with default configurations.
     pub fn new() -> Self {
-        Self {
+        let engine = Self {
             // Neuroscience
             activation_network: ActivationNetwork::new(),
             synaptic_tagging: SynapticTaggingSystem::new(),
@@ -98,6 +98,8 @@ impl CognitiveEngine {
             // Search
             reranker: Reranker::new(RerankerConfig::default()),
             temporal_searcher: TemporalSearcher::new(),
-        }
+        };
+
+        engine
     }
 }

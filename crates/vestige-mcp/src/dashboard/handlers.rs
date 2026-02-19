@@ -38,7 +38,7 @@ pub async fn list_memories(
         {
             // Use hybrid search
             let results = storage
-                .hybrid_search(query, limit, 0.5, 0.5)
+                .hybrid_search(query, limit, 0.3, 0.7)
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
             let formatted: Vec<Value> = results

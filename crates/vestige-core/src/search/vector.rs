@@ -17,9 +17,9 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 // CONSTANTS
 // ============================================================================
 
-/// Default embedding dimensions (BGE-base-en-v1.5: 768d)
-/// 2026 GOD TIER UPGRADE: +30% retrieval accuracy over MiniLM (384d)
-pub const DEFAULT_DIMENSIONS: usize = 768;
+/// Default embedding dimensions after Matryoshka truncation (768 → 256)
+/// 3x storage savings with only ~2% quality loss on MTEB benchmarks
+pub const DEFAULT_DIMENSIONS: usize = 256;
 
 /// HNSW connectivity parameter (higher = better recall, more memory)
 pub const DEFAULT_CONNECTIVITY: usize = 16;
@@ -137,7 +137,7 @@ impl VectorIndex {
         let options = IndexOptions {
             dimensions: config.dimensions,
             metric: config.metric,
-            quantization: ScalarKind::F32,
+            quantization: ScalarKind::F16,
             connectivity: config.connectivity,
             expansion_add: config.expansion_add,
             expansion_search: config.expansion_search,
@@ -325,7 +325,7 @@ impl VectorIndex {
         let options = IndexOptions {
             dimensions: config.dimensions,
             metric: config.metric,
-            quantization: ScalarKind::F32,
+            quantization: ScalarKind::F16,
             connectivity: config.connectivity,
             expansion_add: config.expansion_add,
             expansion_search: config.expansion_search,

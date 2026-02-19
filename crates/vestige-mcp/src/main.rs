@@ -243,6 +243,18 @@ async fn main() {
     let cognitive = Arc::new(Mutex::new(cognitive::CognitiveEngine::new()));
     info!("CognitiveEngine initialized (26 modules)");
 
+    // Load cross-encoder reranker in the background (downloads ~150MB on first run)
+    #[cfg(feature = "embeddings")]
+    {
+        let cog_clone = Arc::clone(&cognitive);
+        tokio::spawn(async move {
+            // Small delay so we don't block the stdio handshake
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let mut cog = cog_clone.lock().await;
+            cog.reranker.init_cross_encoder();
+        });
+    }
+
     // Create MCP server
     let server = McpServer::new(storage, cognitive);
 

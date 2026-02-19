@@ -127,9 +127,9 @@ pub async fn execute(
     let min_retention = args.min_retention.unwrap_or(0.0).clamp(0.0, 1.0);
     let min_similarity = args.min_similarity.unwrap_or(0.5).clamp(0.0, 1.0);
 
-    // Use balanced weights for hybrid search (keyword + semantic)
-    let keyword_weight = 0.5_f32;
-    let semantic_weight = 0.5_f32;
+    // Favor semantic search — research shows 0.3/0.7 outperforms equal weights
+    let keyword_weight = 0.3_f32;
+    let semantic_weight = 0.7_f32;
 
     // ====================================================================
     // STAGE 1: Hybrid search with 3x over-fetch for reranking pool
@@ -160,7 +160,7 @@ pub async fn execute(
     // ====================================================================
     // STAGE 2: Reranker (BM25-like rescoring, trim to requested limit)
     // ====================================================================
-    if let Ok(cog) = cognitive.try_lock() {
+    if let Ok(mut cog) = cognitive.try_lock() {
         let candidates: Vec<_> = filtered_results
             .iter()
             .map(|r| (r.clone(), r.node.content.clone()))

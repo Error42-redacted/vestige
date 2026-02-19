@@ -22,10 +22,10 @@ use crate::memory::{
 use crate::search::sanitize_fts5_query;
 
 #[cfg(feature = "embeddings")]
-use crate::embeddings::{Embedding, EmbeddingService, EMBEDDING_DIMENSIONS};
+use crate::embeddings::{matryoshka_truncate, Embedding, EmbeddingService, EMBEDDING_DIMENSIONS};
 
 #[cfg(feature = "vector-search")]
-use crate::search::{reciprocal_rank_fusion, VectorIndex};
+use crate::search::{linear_combination, VectorIndex};
 
 // ============================================================================
 // ERROR TYPES
@@ -202,7 +202,13 @@ impl Storage {
 
         for (node_id, embedding_bytes) in embeddings {
             if let Some(embedding) = Embedding::from_bytes(&embedding_bytes) {
-                if let Err(e) = index.add(&node_id, &embedding.vector) {
+                // Handle Matryoshka migration: old 768-dim → truncate to 256-dim
+                let vector = if embedding.dimensions != EMBEDDING_DIMENSIONS {
+                    matryoshka_truncate(embedding.vector)
+                } else {
+                    embedding.vector
+                };
+                if let Err(e) = index.add(&node_id, &vector) {
                     tracing::warn!("Failed to load embedding for {}: {}", node_id, e);
                 }
             }
@@ -690,7 +696,7 @@ impl Storage {
             }
             #[cfg(all(feature = "embeddings", feature = "vector-search"))]
             SearchMode::Hybrid => {
-                let results = self.hybrid_search(&input.query, input.limit, 0.5, 0.5)?;
+                let results = self.hybrid_search(&input.query, input.limit, 0.3, 0.7)?;
                 results.into_iter().map(|r| r.node).collect()
             }
             #[cfg(not(all(feature = "embeddings", feature = "vector-search")))]
@@ -1257,7 +1263,7 @@ impl Storage {
         };
 
         let combined = if !semantic_results.is_empty() {
-            reciprocal_rank_fusion(&keyword_results, &semantic_results, 60.0)
+            linear_combination(&keyword_results, &semantic_results, keyword_weight, semantic_weight)
         } else {
             keyword_results.clone()
         };

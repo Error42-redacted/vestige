@@ -162,8 +162,8 @@ pub async fn execute_hybrid(
         .hybrid_search(
             &args.query,
             args.limit.unwrap_or(10).clamp(1, 50),
-            args.keyword_weight.unwrap_or(0.5).clamp(0.0, 1.0),
-            args.semantic_weight.unwrap_or(0.5).clamp(0.0, 1.0),
+            args.keyword_weight.unwrap_or(0.3).clamp(0.0, 1.0),
+            args.semantic_weight.unwrap_or(0.7).clamp(0.0, 1.0),
         )
         .map_err(|e| e.to_string())?;
 

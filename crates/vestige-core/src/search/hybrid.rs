@@ -117,8 +117,8 @@ pub struct HybridSearchConfig {
 impl Default for HybridSearchConfig {
     fn default() -> Self {
         Self {
-            keyword_weight: 0.5,
-            semantic_weight: 0.5,
+            keyword_weight: 0.3,
+            semantic_weight: 0.7,
             rrf_k: 60.0,
             min_semantic_similarity: 0.3,
             source_limit_multiplier: 2,
