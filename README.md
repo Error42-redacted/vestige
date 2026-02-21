@@ -9,13 +9,13 @@
 
 > Your AI forgets everything between sessions. Vestige fixes that. Built on 130 years of memory research — FSRS-6 spaced repetition, prediction error gating, synaptic tagging — all running in a single Rust binary, 100% local.
 
-### What's New in v1.8.0
+### What's New in v1.9.1
 
-- **One-call session init** — new `session_context` tool replaces 5 calls (~15K → ~500 tokens)
-- **Token budgeting** — `token_budget` parameter on `search` and `session_context` for cost control
-- **Reader/writer split** — concurrent SQLite reads via WAL mode, `Arc<Storage>` everywhere
-- **int8 vectors** — 2x memory savings with <1% recall loss
-- **FTS5 porter stemmer** — 15-30% better keyword search via stemming
+- **Self-regulating memory** — Retention Target System auto-GCs decaying memories, Auto-Promote boosts frequently accessed memories, Waking SWR Tags give promoted memories preferential dream replay
+- **`memory_health`** — retention dashboard with distribution buckets, trend tracking, and recommendations
+- **`memory_graph`** — knowledge graph visualization with Fruchterman-Reingold force-directed layout
+- **Dream persistence** — dream-discovered connections now persist to database, enabling graph traversal across your knowledge network
+- **21 MCP tools** — up from 19
 
 See [CHANGELOG](CHANGELOG.md) for full version history.
 
@@ -33,7 +33,7 @@ claude mcp add vestige vestige-mcp -s user
 
 # 3. Test
 # "Remember that I prefer TypeScript over JavaScript"
-# New session → "What are my coding preferences?"
+# New session -> "What are my coding preferences?"
 # It remembers.
 ```
 
@@ -98,6 +98,7 @@ RAG is a dumb bucket. Vestige is an active organ.
 | **Decay** | Nothing ever expires | **FSRS-6** — memories fade like yours do, keeping context lean |
 | **Duplicates** | Manual dedup or none | **Self-healing** — automatically merges "likes dark mode" + "prefers dark themes" |
 | **Importance** | All memories are equal | **Synaptic tagging** — retroactively strengthens memories that turn out to matter |
+| **Health** | No visibility | **Retention dashboard** — track avg retention, distribution, trends, and recommendations |
 | **Privacy** | Usually cloud-dependent | **100% local** — your data never leaves your machine |
 
 ---
@@ -118,17 +119,19 @@ This isn't a key-value store with an embedding model bolted on. Vestige implemen
 
 **Memory States** — Active, Dormant, Silent, Unavailable. Memories transition between states based on usage patterns, exactly like human cognitive architecture.
 
-**Memory Dreaming** *(v1.5.0)* — Like sleep consolidation. Replays recent memories to discover hidden connections, strengthen important patterns, and synthesize insights. Based on the [Active Dreaming Memory](https://engrxiv.org/preprint/download/5919/9826/8234) framework.
+**Memory Dreaming** *(v1.5.0)* — Like sleep consolidation. Replays recent memories to discover hidden connections, strengthen important patterns, and synthesize insights. Connections persist to a graph database for traversal. Based on the [Active Dreaming Memory](https://engrxiv.org/preprint/download/5919/9826/8234) framework.
 
 **ACT-R Activation** *(v1.5.0)* — Retrieval strength depends on BOTH recency AND frequency of access, computed from full access history. A memory accessed 50 times over 3 weeks is stronger than one accessed once yesterday. Based on [Anderson, 1993](http://act-r.psy.cmu.edu/).
 
-**Automatic Consolidation** *(v1.5.0)* — FSRS-6 decay runs automatically every 6 hours + inline every 100 tool calls. Episodic memories auto-merge into semantic summaries. Cross-memory reinforcement strengthens neighbors on access. No manual maintenance needed.
+**Waking SWR Tagging** *(v1.9.0)* — Memories promoted during waking use get sharp-wave ripple tags for preferential replay during dream consolidation. 70/30 tagged-to-random ratio ensures important memories get replayed first. Based on [Buzsaki, 2015](https://doi.org/10.1038/nn.3963).
 
-[Full science documentation →](docs/SCIENCE.md)
+**Autonomic Regulation** *(v1.9.0)* — Self-regulating memory health. Auto-promotes memories accessed 3+ times in 24h (frequency-dependent potentiation). Auto-GCs low-retention memories when average retention falls below target. Consolidation triggers on 6h staleness or 2h active use.
+
+[Full science documentation ->](docs/SCIENCE.md)
 
 ---
 
-## Tools — 19 MCP Tools
+## Tools — 21 MCP Tools
 
 ### Context Packets (v1.8.0)
 | Tool | What It Does |
@@ -147,9 +150,15 @@ This isn't a key-value store with an embedding model bolted on. Vestige implemen
 ### Cognitive Engine
 | Tool | What It Does |
 |------|-------------|
-| `dream` | Memory consolidation via replay — discovers hidden connections, synthesizes insights |
+| `dream` | Memory consolidation via replay — discovers hidden connections, synthesizes insights, persists connections to graph database |
 | `explore_connections` | Graph traversal — reasoning chains, associations via spreading activation, bridges between memories |
 | `predict` | Proactive retrieval — predicts what memories you'll need next based on context and activity patterns |
+
+### Autonomic (v1.9.0)
+| Tool | What It Does |
+|------|-------------|
+| `memory_health` | Retention dashboard — avg retention, distribution buckets (0-20%, 20-40%, etc.), trend (improving/declining/stable), recommendations |
+| `memory_graph` | Knowledge graph visualization — subgraph export with Fruchterman-Reingold force-directed layout, up to 200 nodes with edge weights |
 
 ### Scoring & Dedup
 | Tool | What It Does |
@@ -189,7 +198,7 @@ At the start of every session:
 | "Remind me..." | Creates a future trigger |
 | "This is important" | Saves + strengthens |
 
-[Full CLAUDE.md templates →](docs/CLAUDE-SETUP.md)
+[Full CLAUDE.md templates ->](docs/CLAUDE-SETUP.md)
 
 ---
 
@@ -208,7 +217,7 @@ vestige restore <file>     # Restore from backup
 
 ## Technical Details
 
-- **Language:** Rust (52,000+ lines, 1,100+ tests)
+- **Language:** Rust (55,000+ lines, 1,100+ tests)
 - **Binary size:** ~20MB
 - **Embeddings:** Nomic Embed Text v1.5 (768-dim, local ONNX inference via fastembed)
 - **Vector search:** USearch HNSW (20x faster than FAISS)
@@ -217,6 +226,7 @@ vestige restore <file>     # Restore from backup
 - **Dependencies:** Zero runtime dependencies beyond the binary
 - **First run:** Downloads embedding model (~130MB), then fully offline
 - **Platforms:** macOS (ARM/Intel), Linux (x86_64), Windows
+- **Cognitive modules:** 28 stateful modules (15 neuroscience, 11 advanced, 2 search)
 
 ---
 
@@ -264,7 +274,7 @@ Cache locations:
 - **Windows**: `%LOCALAPPDATA%\vestige\cache\fastembed`
 </details>
 
-[More troubleshooting →](docs/FAQ.md#troubleshooting)
+[More troubleshooting ->](docs/FAQ.md#troubleshooting)
 
 ---
 
