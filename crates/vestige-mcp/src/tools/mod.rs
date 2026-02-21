@@ -8,7 +8,6 @@
 
 // Active unified tools
 pub mod codebase_unified;
-pub mod ingest;
 pub mod intention_unified;
 pub mod memory_unified;
 pub mod search_unified;
@@ -22,7 +21,6 @@ pub mod timeline;
 pub mod maintenance;
 
 // v1.3: Auto-save and dedup tools
-pub mod checkpoint;
 pub mod dedup;
 pub mod importance;
 
@@ -35,6 +33,8 @@ pub mod restore;
 // Deprecated tools - kept for internal backwards compatibility
 // These modules are intentionally unused in the public API
 #[allow(dead_code)]
+pub mod checkpoint;
+#[allow(dead_code)]
 pub mod codebase;
 #[allow(dead_code)]
 pub mod consolidate;
@@ -42,6 +42,8 @@ pub mod consolidate;
 pub mod context;
 #[allow(dead_code)]
 pub mod feedback;
+#[allow(dead_code)]
+pub mod ingest;
 #[allow(dead_code)]
 pub mod intentions;
 #[allow(dead_code)]

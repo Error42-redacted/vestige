@@ -4,8 +4,9 @@
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use chrono::Utc;
 use crate::cognitive::CognitiveEngine;
-use vestige_core::Storage;
+use vestige_core::{DreamHistoryRecord, Storage};
 
 pub fn schema() -> serde_json::Value {
     serde_json::json!({
@@ -31,8 +32,8 @@ pub async fn execute(
         .and_then(|v| v.as_u64())
         .unwrap_or(50) as usize;
 
-    let storage = storage.lock().await;
-    let all_nodes = storage.get_all_nodes(memory_count as i32, 0)
+    let storage_guard = storage.lock().await;
+    let all_nodes = storage_guard.get_all_nodes(memory_count as i32, 0)
         .map_err(|e| format!("Failed to load memories: {}", e))?;
 
     if all_nodes.len() < 5 {
@@ -47,18 +48,36 @@ pub async fn execute(
         vestige_core::DreamMemory {
             id: n.id.clone(),
             content: n.content.clone(),
-            embedding: storage.get_node_embedding(&n.id).ok().flatten(),
+            embedding: storage_guard.get_node_embedding(&n.id).ok().flatten(),
             tags: n.tags.clone(),
             created_at: n.created_at,
             access_count: n.reps as u32,
         }
     }).collect();
     // Drop storage lock before taking cognitive lock (strict ordering)
-    drop(storage);
+    drop(storage_guard);
 
     let cog = cognitive.lock().await;
     let dream_result = cog.dreamer.dream(&dream_memories).await;
     let insights = cog.dreamer.synthesize_insights(&dream_memories);
+    drop(cog);
+
+    // Persist dream history (non-fatal on failure — dream still happened)
+    {
+        let mut storage_guard = storage.lock().await;
+        let record = DreamHistoryRecord {
+            dreamed_at: Utc::now(),
+            duration_ms: dream_result.duration_ms as i64,
+            memories_replayed: dream_memories.len() as i32,
+            connections_found: dream_result.new_connections_found as i32,
+            insights_generated: dream_result.insights_generated.len() as i32,
+            memories_strengthened: dream_result.memories_strengthened as i32,
+            memories_compressed: dream_result.memories_compressed as i32,
+        };
+        if let Err(e) = storage_guard.save_dream_history(&record) {
+            tracing::warn!("Failed to persist dream history: {}", e);
+        }
+    }
 
     Ok(serde_json::json!({
         "status": "dreamed",
@@ -188,5 +207,29 @@ mod tests {
         assert!(value["stats"]["memories_compressed"].is_number());
         assert!(value["stats"]["insights_generated"].is_number());
         assert!(value["stats"]["duration_ms"].is_number());
+    }
+
+    #[tokio::test]
+    async fn test_dream_persists_to_database() {
+        let (storage, _dir) = test_storage().await;
+        ingest_n_memories(&storage, 10).await;
+
+        // Before dream: no dream history
+        {
+            let s = storage.lock().await;
+            assert!(s.get_last_dream().unwrap().is_none());
+        }
+
+        let result = execute(&storage, &test_cognitive(), None).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["status"], "dreamed");
+
+        // After dream: dream history should exist
+        {
+            let s = storage.lock().await;
+            let last = s.get_last_dream().unwrap();
+            assert!(last.is_some(), "Dream should have been persisted to database");
+        }
     }
 }

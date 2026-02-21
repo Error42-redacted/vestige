@@ -8,7 +8,8 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use vestige_core::{MemoryState, Storage};
+use crate::cognitive::CognitiveEngine;
+use vestige_core::{MemoryState, Modification, OutcomeType, Storage};
 
 // Accessibility thresholds based on retention strength
 const ACCESSIBILITY_ACTIVE: f64 = 0.7;
@@ -42,12 +43,16 @@ pub fn schema() -> Value {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["get", "delete", "state"],
-                "description": "Action to perform: 'get' retrieves full memory node, 'delete' removes memory, 'state' returns accessibility state"
+                "enum": ["get", "delete", "state", "promote", "demote"],
+                "description": "Action to perform: 'get' retrieves full memory node, 'delete' removes memory, 'state' returns accessibility state, 'promote' increases retrieval strength (thumbs up), 'demote' decreases retrieval strength (thumbs down)"
             },
             "id": {
                 "type": "string",
                 "description": "The ID of the memory node"
+            },
+            "reason": {
+                "type": "string",
+                "description": "Why this memory is being promoted/demoted (optional, for logging). Only used with promote/demote actions."
             }
         },
         "required": ["action", "id"]
@@ -59,11 +64,13 @@ pub fn schema() -> Value {
 struct MemoryArgs {
     action: String,
     id: String,
+    reason: Option<String>,
 }
 
 /// Execute the unified memory tool
 pub async fn execute(
     storage: &Arc<Mutex<Storage>>,
+    cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: MemoryArgs = match args {
@@ -78,8 +85,10 @@ pub async fn execute(
         "get" => execute_get(storage, &args.id).await,
         "delete" => execute_delete(storage, &args.id).await,
         "state" => execute_state(storage, &args.id).await,
+        "promote" => execute_promote(storage, cognitive, &args.id, args.reason).await,
+        "demote" => execute_demote(storage, cognitive, &args.id, args.reason).await,
         _ => Err(format!(
-            "Invalid action '{}'. Must be one of: get, delete, state",
+            "Invalid action '{}'. Must be one of: get, delete, state, promote, demote",
             args.action
         )),
     }
@@ -186,6 +195,120 @@ async fn execute_state(storage: &Arc<Mutex<Storage>>, id: &str) -> Result<Value,
     }))
 }
 
+/// Promote a memory (thumbs up) — increases retrieval strength with cognitive feedback pipeline
+async fn execute_promote(
+    storage: &Arc<Mutex<Storage>>,
+    cognitive: &Arc<Mutex<CognitiveEngine>>,
+    id: &str,
+    reason: Option<String>,
+) -> Result<Value, String> {
+    let storage_guard = storage.lock().await;
+
+    let before = storage_guard.get_node(id).map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Node not found: {}", id))?;
+
+    let node = storage_guard.promote_memory(id).map_err(|e| e.to_string())?;
+    drop(storage_guard);
+
+    // Cognitive feedback pipeline
+    if let Ok(mut cog) = cognitive.try_lock() {
+        cog.reward_signal.record_outcome(id, OutcomeType::Helpful);
+        cog.importance_tracker.on_retrieved(id, true);
+        if cog.reconsolidation.is_labile(id) {
+            cog.reconsolidation.apply_modification(
+                id,
+                Modification::StrengthenConnection {
+                    target_memory_id: id.to_string(),
+                    boost: 0.2,
+                },
+            );
+        }
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "action": "promoted",
+        "nodeId": node.id,
+        "reason": reason,
+        "changes": {
+            "retrievalStrength": {
+                "before": before.retrieval_strength,
+                "after": node.retrieval_strength,
+                "delta": "+0.20"
+            },
+            "retentionStrength": {
+                "before": before.retention_strength,
+                "after": node.retention_strength,
+                "delta": "+0.10"
+            },
+            "stability": {
+                "before": before.stability,
+                "after": node.stability,
+                "multiplier": "1.5x"
+            }
+        },
+        "message": format!("Memory promoted. It will now surface more often in searches. Retrieval: {:.2} -> {:.2}",
+            before.retrieval_strength, node.retrieval_strength),
+    }))
+}
+
+/// Demote a memory (thumbs down) — decreases retrieval strength with cognitive feedback pipeline
+async fn execute_demote(
+    storage: &Arc<Mutex<Storage>>,
+    cognitive: &Arc<Mutex<CognitiveEngine>>,
+    id: &str,
+    reason: Option<String>,
+) -> Result<Value, String> {
+    let storage_guard = storage.lock().await;
+
+    let before = storage_guard.get_node(id).map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Node not found: {}", id))?;
+
+    let node = storage_guard.demote_memory(id).map_err(|e| e.to_string())?;
+    drop(storage_guard);
+
+    // Cognitive feedback pipeline
+    if let Ok(mut cog) = cognitive.try_lock() {
+        cog.reward_signal.record_outcome(id, OutcomeType::NotHelpful);
+        cog.importance_tracker.on_retrieved(id, false);
+        if cog.reconsolidation.is_labile(id) {
+            cog.reconsolidation.apply_modification(
+                id,
+                Modification::AddContext {
+                    context: "User reported this memory was wrong/unhelpful".to_string(),
+                },
+            );
+        }
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "action": "demoted",
+        "nodeId": node.id,
+        "reason": reason,
+        "changes": {
+            "retrievalStrength": {
+                "before": before.retrieval_strength,
+                "after": node.retrieval_strength,
+                "delta": "-0.30"
+            },
+            "retentionStrength": {
+                "before": before.retention_strength,
+                "after": node.retention_strength,
+                "delta": "-0.15"
+            },
+            "stability": {
+                "before": before.stability,
+                "after": node.stability,
+                "multiplier": "0.5x"
+            }
+        },
+        "message": format!("Memory demoted. Better alternatives will now surface instead. Retrieval: {:.2} -> {:.2}",
+            before.retrieval_strength, node.retrieval_strength),
+        "note": "Memory is NOT deleted - it remains searchable but ranks lower."
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,10 +341,20 @@ mod tests {
         let schema = schema();
         assert!(schema["properties"]["action"].is_object());
         assert!(schema["properties"]["id"].is_object());
+        assert!(schema["properties"]["reason"].is_object());
         assert_eq!(schema["required"], serde_json::json!(["action", "id"]));
+        // Verify all 5 actions are in enum
+        let actions = schema["properties"]["action"]["enum"].as_array().unwrap();
+        assert_eq!(actions.len(), 5);
+        assert!(actions.contains(&serde_json::json!("promote")));
+        assert!(actions.contains(&serde_json::json!("demote")));
     }
 
     // === INTEGRATION TESTS ===
+
+    fn test_cognitive() -> Arc<Mutex<CognitiveEngine>> {
+        Arc::new(Mutex::new(CognitiveEngine::new()))
+    }
 
     async fn test_storage() -> (Arc<Mutex<Storage>>, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().unwrap();
@@ -249,7 +382,7 @@ mod tests {
     #[tokio::test]
     async fn test_missing_args_fails() {
         let (storage, _dir) = test_storage().await;
-        let result = execute(&storage, None).await;
+        let result = execute(&storage, &test_cognitive(), None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Missing arguments"));
     }
@@ -258,7 +391,7 @@ mod tests {
     async fn test_invalid_action_fails() {
         let (storage, _dir) = test_storage().await;
         let args = serde_json::json!({ "action": "invalid", "id": "00000000-0000-0000-0000-000000000000" });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Invalid action"));
     }
@@ -267,7 +400,7 @@ mod tests {
     async fn test_invalid_uuid_fails() {
         let (storage, _dir) = test_storage().await;
         let args = serde_json::json!({ "action": "get", "id": "not-a-uuid" });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Invalid memory ID format"));
     }
@@ -277,7 +410,7 @@ mod tests {
         let (storage, _dir) = test_storage().await;
         let id = ingest_memory(&storage).await;
         let args = serde_json::json!({ "action": "get", "id": id });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
         let value = result.unwrap();
         assert_eq!(value["action"], "get");
@@ -293,7 +426,7 @@ mod tests {
     async fn test_get_nonexistent_memory() {
         let (storage, _dir) = test_storage().await;
         let args = serde_json::json!({ "action": "get", "id": "00000000-0000-0000-0000-000000000000" });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
         let value = result.unwrap();
         assert_eq!(value["found"], false);
@@ -305,7 +438,7 @@ mod tests {
         let (storage, _dir) = test_storage().await;
         let id = ingest_memory(&storage).await;
         let args = serde_json::json!({ "action": "delete", "id": id });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
         let value = result.unwrap();
         assert_eq!(value["action"], "delete");
@@ -316,7 +449,7 @@ mod tests {
     async fn test_delete_nonexistent_memory() {
         let (storage, _dir) = test_storage().await;
         let args = serde_json::json!({ "action": "delete", "id": "00000000-0000-0000-0000-000000000000" });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
         let value = result.unwrap();
         assert_eq!(value["success"], false);
@@ -328,9 +461,9 @@ mod tests {
         let (storage, _dir) = test_storage().await;
         let id = ingest_memory(&storage).await;
         let del_args = serde_json::json!({ "action": "delete", "id": id });
-        execute(&storage, Some(del_args)).await.unwrap();
+        execute(&storage, &test_cognitive(), Some(del_args)).await.unwrap();
         let get_args = serde_json::json!({ "action": "get", "id": id });
-        let result = execute(&storage, Some(get_args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(get_args)).await;
         let value = result.unwrap();
         assert_eq!(value["found"], false);
     }
@@ -340,7 +473,7 @@ mod tests {
         let (storage, _dir) = test_storage().await;
         let id = ingest_memory(&storage).await;
         let args = serde_json::json!({ "action": "state", "id": id });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
         let value = result.unwrap();
         assert_eq!(value["action"], "state");
@@ -360,14 +493,13 @@ mod tests {
     async fn test_state_nonexistent_memory_fails() {
         let (storage, _dir) = test_storage().await;
         let args = serde_json::json!({ "action": "state", "id": "00000000-0000-0000-0000-000000000000" });
-        let result = execute(&storage, Some(args)).await;
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
     }
 
     #[test]
     fn test_accessibility_boundary_active() {
-        // Exactly at active threshold
         let a = compute_accessibility(1.0, 0.7, 0.5);
         assert!(a >= ACCESSIBILITY_ACTIVE);
         assert!(matches!(state_from_accessibility(a), MemoryState::Active));
@@ -378,5 +510,115 @@ mod tests {
         let a = compute_accessibility(0.0, 0.0, 0.0);
         assert_eq!(a, 0.0);
         assert!(matches!(state_from_accessibility(a), MemoryState::Unavailable));
+    }
+
+    // ========================================================================
+    // PROMOTE/DEMOTE TESTS (ported from feedback.rs, v1.7.0 merge)
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_promote_missing_id_fails() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({ "action": "promote", "id": "not-a-uuid" });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid memory ID format"));
+    }
+
+    #[tokio::test]
+    async fn test_promote_nonexistent_node_fails() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({ "action": "promote", "id": "00000000-0000-0000-0000-000000000000" });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Node not found"));
+    }
+
+    #[tokio::test]
+    async fn test_promote_succeeds() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+        let args = serde_json::json!({ "action": "promote", "id": id, "reason": "It was helpful" });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["success"], true);
+        assert_eq!(value["action"], "promoted");
+        assert_eq!(value["nodeId"], id);
+        assert_eq!(value["reason"], "It was helpful");
+        assert!(value["changes"]["retrievalStrength"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_promote_without_reason_succeeds() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+        let args = serde_json::json!({ "action": "promote", "id": id });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["success"], true);
+        assert!(value["reason"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_promote_changes_contain_expected_fields() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+        let args = serde_json::json!({ "action": "promote", "id": id });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        let value = result.unwrap();
+        assert!(value["changes"]["retrievalStrength"]["before"].is_number());
+        assert!(value["changes"]["retrievalStrength"]["after"].is_number());
+        assert_eq!(value["changes"]["retrievalStrength"]["delta"], "+0.20");
+        assert!(value["changes"]["retentionStrength"]["before"].is_number());
+        assert_eq!(value["changes"]["retentionStrength"]["delta"], "+0.10");
+        assert_eq!(value["changes"]["stability"]["multiplier"], "1.5x");
+    }
+
+    #[tokio::test]
+    async fn test_demote_invalid_uuid_fails() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({ "action": "demote", "id": "bad-id" });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid memory ID format"));
+    }
+
+    #[tokio::test]
+    async fn test_demote_nonexistent_node_fails() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({ "action": "demote", "id": "00000000-0000-0000-0000-000000000000" });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Node not found"));
+    }
+
+    #[tokio::test]
+    async fn test_demote_succeeds() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+        let args = serde_json::json!({ "action": "demote", "id": id, "reason": "It was wrong" });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["success"], true);
+        assert_eq!(value["action"], "demoted");
+        assert_eq!(value["nodeId"], id);
+        assert_eq!(value["reason"], "It was wrong");
+        assert!(value["note"].as_str().unwrap().contains("NOT deleted"));
+    }
+
+    #[tokio::test]
+    async fn test_demote_changes_contain_expected_fields() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+        let args = serde_json::json!({ "action": "demote", "id": id });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        let value = result.unwrap();
+        assert!(value["changes"]["retrievalStrength"]["before"].is_number());
+        assert_eq!(value["changes"]["retrievalStrength"]["delta"], "-0.30");
+        assert_eq!(value["changes"]["retentionStrength"]["delta"], "-0.15");
+        assert_eq!(value["changes"]["stability"]["multiplier"], "0.5x");
     }
 }

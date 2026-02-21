@@ -1,7 +1,7 @@
 //! Maintenance MCP Tools
 //!
 //! Exposes CLI-only operations as MCP tools so Claude can trigger them automatically:
-//! health_check, consolidate, stats, backup, export, gc.
+//! system_status, consolidate, backup, export, gc.
 
 use chrono::{NaiveDate, Utc};
 use serde::Deserialize;
@@ -17,6 +17,8 @@ use vestige_core::{FSRSScheduler, MemoryLifecycle, MemoryState, Storage};
 // SCHEMAS
 // ============================================================================
 
+/// Deprecated in v1.7 — use system_status_schema() instead
+#[allow(dead_code)]
 pub fn health_check_schema() -> Value {
     serde_json::json!({
         "type": "object",
@@ -31,6 +33,8 @@ pub fn consolidate_schema() -> Value {
     })
 }
 
+/// Deprecated in v1.7 — use system_status_schema() instead
+#[allow(dead_code)]
 pub fn stats_schema() -> Value {
     serde_json::json!({
         "type": "object",
@@ -97,11 +101,203 @@ pub fn gc_schema() -> Value {
     })
 }
 
+/// Combined system status schema (replaces health_check + stats in v1.7.0)
+pub fn system_status_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {}
+    })
+}
+
 // ============================================================================
 // EXECUTE FUNCTIONS
 // ============================================================================
 
-/// Health check tool
+/// Combined system status tool (merges health_check + stats, v1.7.0)
+///
+/// Returns system health status, full statistics, FSRS preview,
+/// cognitive module health, state distribution, and actionable recommendations.
+pub async fn execute_system_status(
+    storage: &Arc<Mutex<Storage>>,
+    cognitive: &Arc<Mutex<CognitiveEngine>>,
+    _args: Option<Value>,
+) -> Result<Value, String> {
+    let storage_guard = storage.lock().await;
+    let stats = storage_guard.get_stats().map_err(|e| e.to_string())?;
+
+    // === Health assessment ===
+    let status = if stats.total_nodes == 0 {
+        "empty"
+    } else if stats.average_retention < 0.3 {
+        "critical"
+    } else if stats.average_retention < 0.5 {
+        "degraded"
+    } else {
+        "healthy"
+    };
+
+    let embedding_coverage = if stats.total_nodes > 0 {
+        (stats.nodes_with_embeddings as f64 / stats.total_nodes as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let embedding_ready = storage_guard.is_embedding_ready();
+
+    let mut warnings = Vec::new();
+    if stats.average_retention < 0.5 && stats.total_nodes > 0 {
+        warnings.push("Low average retention - consider running consolidation");
+    }
+    if stats.nodes_due_for_review > 10 {
+        warnings.push("Many memories are due for review");
+    }
+    if stats.total_nodes > 0 && stats.nodes_with_embeddings == 0 {
+        warnings.push("No embeddings generated - semantic search unavailable");
+    }
+    if embedding_coverage < 50.0 && stats.total_nodes > 10 {
+        warnings.push("Low embedding coverage - run consolidate to improve semantic search");
+    }
+
+    let mut recommendations = Vec::new();
+    if status == "critical" {
+        recommendations.push("CRITICAL: Many memories have very low retention. Review important memories.");
+    }
+    if stats.nodes_due_for_review > 5 {
+        recommendations.push("Review due memories to strengthen retention.");
+    }
+    if stats.nodes_with_embeddings < stats.total_nodes {
+        recommendations.push("Run 'consolidate' to generate missing embeddings.");
+    }
+    if stats.total_nodes > 100 && stats.average_retention < 0.7 {
+        recommendations.push("Consider running periodic consolidation.");
+    }
+    if status == "healthy" && recommendations.is_empty() {
+        recommendations.push("Memory system is healthy!");
+    }
+
+    // === State distribution ===
+    let nodes = storage_guard.get_all_nodes(500, 0).map_err(|e| e.to_string())?;
+    let total = nodes.len();
+    let (active, dormant, silent, unavailable) = if total > 0 {
+        let mut a = 0usize;
+        let mut d = 0usize;
+        let mut s = 0usize;
+        let mut u = 0usize;
+        for node in &nodes {
+            let accessibility = node.retention_strength * 0.5
+                + node.retrieval_strength * 0.3
+                + node.storage_strength * 0.2;
+            if accessibility >= 0.7 {
+                a += 1;
+            } else if accessibility >= 0.4 {
+                d += 1;
+            } else if accessibility >= 0.1 {
+                s += 1;
+            } else {
+                u += 1;
+            }
+        }
+        (a, d, s, u)
+    } else {
+        (0, 0, 0, 0)
+    };
+
+    // === FSRS Preview ===
+    let scheduler = FSRSScheduler::default();
+    let fsrs_preview = if let Some(representative) = nodes.first() {
+        let mut state = scheduler.new_card();
+        state.difficulty = representative.difficulty;
+        state.stability = representative.stability;
+        state.reps = representative.reps;
+        state.lapses = representative.lapses;
+        state.last_review = representative.last_accessed;
+        let elapsed = scheduler.days_since_review(&state.last_review);
+        let preview = scheduler.preview_reviews(&state, elapsed);
+        Some(serde_json::json!({
+            "representativeMemoryId": representative.id,
+            "elapsedDays": format!("{:.1}", elapsed),
+            "intervalIfGood": preview.good.interval,
+            "intervalIfEasy": preview.easy.interval,
+            "intervalIfHard": preview.hard.interval,
+            "currentRetrievability": format!("{:.3}", preview.good.retrievability),
+        }))
+    } else {
+        None
+    };
+
+    // === Cognitive health ===
+    let cognitive_health = if let Ok(cog) = cognitive.try_lock() {
+        let activation_count = cog.activation_network.get_associations("_probe_").len();
+        let prediction_accuracy = cog.predictive_memory.prediction_accuracy().unwrap_or(0.0);
+        let scheduler_stats = cog.consolidation_scheduler.get_activity_stats();
+        Some(serde_json::json!({
+            "activationNetworkSize": activation_count,
+            "predictionAccuracy": format!("{:.2}", prediction_accuracy),
+            "modulesActive": 28,
+            "schedulerStats": {
+                "totalEvents": scheduler_stats.total_events,
+                "eventsPerMinute": scheduler_stats.events_per_minute,
+                "isIdle": scheduler_stats.is_idle,
+                "timeUntilNextConsolidation": format!("{:?}", cog.consolidation_scheduler.time_until_next()),
+            },
+        }))
+    } else {
+        None
+    };
+
+    // === Automation triggers (for conditional dream/backup/gc at session start) ===
+    let last_consolidation = storage_guard.get_last_consolidation().ok().flatten();
+    let last_dream = storage_guard.get_last_dream().ok().flatten();
+    let saves_since_last_dream = match &last_dream {
+        Some(dt) => storage_guard.count_memories_since(*dt).unwrap_or(0),
+        None => stats.total_nodes as i64,
+    };
+    let last_backup = Storage::get_last_backup_timestamp();
+
+    drop(storage_guard);
+
+    Ok(serde_json::json!({
+        "tool": "system_status",
+        // Health
+        "status": status,
+        "warnings": warnings,
+        "recommendations": recommendations,
+        "embeddingReady": embedding_ready,
+        // Stats
+        "totalMemories": stats.total_nodes,
+        "dueForReview": stats.nodes_due_for_review,
+        "averageRetention": stats.average_retention,
+        "averageStorageStrength": stats.average_storage_strength,
+        "averageRetrievalStrength": stats.average_retrieval_strength,
+        "withEmbeddings": stats.nodes_with_embeddings,
+        "embeddingCoverage": format!("{:.1}%", embedding_coverage),
+        "embeddingModel": stats.embedding_model,
+        "oldestMemory": stats.oldest_memory.map(|dt| dt.to_rfc3339()),
+        "newestMemory": stats.newest_memory.map(|dt| dt.to_rfc3339()),
+        // Distribution
+        "stateDistribution": {
+            "active": active,
+            "dormant": dormant,
+            "silent": silent,
+            "unavailable": unavailable,
+            "sampled": total,
+        },
+        // FSRS
+        "fsrsPreview": fsrs_preview,
+        // Cognitive
+        "cognitiveHealth": cognitive_health,
+        // Automation triggers — Claude uses these to decide when to dream/backup/gc
+        "automationTriggers": {
+            "lastDreamTimestamp": last_dream.map(|dt| dt.to_rfc3339()),
+            "savesSinceLastDream": saves_since_last_dream,
+            "lastBackupTimestamp": last_backup.map(|dt| dt.to_rfc3339()),
+            "lastConsolidationTimestamp": last_consolidation.map(|dt| dt.to_rfc3339()),
+        },
+    }))
+}
+
+/// Health check tool — deprecated in v1.7, use execute_system_status() instead
+#[allow(dead_code)]
 pub async fn execute_health_check(
     storage: &Arc<Mutex<Storage>>,
     _args: Option<Value>,
@@ -193,7 +389,8 @@ pub async fn execute_consolidate(
     }))
 }
 
-/// Stats tool
+/// Stats tool — deprecated in v1.7, use execute_system_status() instead
+#[allow(dead_code)]
 pub async fn execute_stats(
     storage: &Arc<Mutex<Storage>>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
@@ -670,4 +867,120 @@ pub async fn execute_gc(
         "totalBefore": all_nodes.len(),
         "totalAfter": all_nodes.len() - deleted,
     }))
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cognitive::CognitiveEngine;
+    use tempfile::TempDir;
+
+    fn test_cognitive() -> Arc<Mutex<CognitiveEngine>> {
+        Arc::new(Mutex::new(CognitiveEngine::new()))
+    }
+
+    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
+        (Arc::new(Mutex::new(storage)), dir)
+    }
+
+    #[test]
+    fn test_system_status_schema() {
+        let schema = system_status_schema();
+        assert_eq!(schema["type"], "object");
+    }
+
+    #[tokio::test]
+    async fn test_system_status_empty_db() {
+        let (storage, _dir) = test_storage().await;
+        let result = execute_system_status(&storage, &test_cognitive(), None).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["tool"], "system_status");
+        assert_eq!(value["status"], "empty");
+        assert_eq!(value["totalMemories"], 0);
+        assert!(value["warnings"].is_array());
+        assert!(value["recommendations"].is_array());
+    }
+
+    #[tokio::test]
+    async fn test_system_status_with_memories() {
+        let (storage, _dir) = test_storage().await;
+        {
+            let mut s = storage.lock().await;
+            s.ingest(vestige_core::IngestInput {
+                content: "Test memory for status".to_string(),
+                node_type: "fact".to_string(),
+                source: None,
+                sentiment_score: 0.0,
+                sentiment_magnitude: 0.0,
+                tags: vec![],
+                valid_from: None,
+                valid_until: None,
+            }).unwrap();
+        }
+        let result = execute_system_status(&storage, &test_cognitive(), None).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["totalMemories"], 1);
+        assert!(value["stateDistribution"].is_object());
+        assert!(value["embeddingCoverage"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_system_status_has_cognitive_health() {
+        let (storage, _dir) = test_storage().await;
+        let result = execute_system_status(&storage, &test_cognitive(), None).await;
+        let value = result.unwrap();
+        assert!(value["cognitiveHealth"].is_object());
+        assert_eq!(value["cognitiveHealth"]["modulesActive"], 28);
+    }
+
+    #[tokio::test]
+    async fn test_system_status_has_automation_triggers() {
+        let (storage, _dir) = test_storage().await;
+        let result = execute_system_status(&storage, &test_cognitive(), None).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+
+        let triggers = &value["automationTriggers"];
+        assert!(triggers.is_object(), "automationTriggers should be present");
+        assert!(triggers["lastDreamTimestamp"].is_null(), "No dreams yet");
+        assert_eq!(triggers["savesSinceLastDream"], 0, "Empty DB = 0 saves");
+        assert!(triggers["lastConsolidationTimestamp"].is_null(), "No consolidation yet");
+        // lastBackupTimestamp depends on filesystem state, just check it exists
+        assert!(triggers.get("lastBackupTimestamp").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_system_status_automation_triggers_with_memories() {
+        let (storage, _dir) = test_storage().await;
+        {
+            let mut s = storage.lock().await;
+            for i in 0..3 {
+                s.ingest(vestige_core::IngestInput {
+                    content: format!("Automation trigger test memory {}", i),
+                    node_type: "fact".to_string(),
+                    source: None,
+                    sentiment_score: 0.0,
+                    sentiment_magnitude: 0.0,
+                    tags: vec![],
+                    valid_from: None,
+                    valid_until: None,
+                }).unwrap();
+            }
+        }
+        let result = execute_system_status(&storage, &test_cognitive(), None).await;
+        let value = result.unwrap();
+
+        let triggers = &value["automationTriggers"];
+        // No dream ever → savesSinceLastDream == totalMemories
+        assert_eq!(triggers["savesSinceLastDream"], 3);
+        assert!(triggers["lastDreamTimestamp"].is_null());
+    }
 }

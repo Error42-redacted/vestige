@@ -5,6 +5,32 @@ All notable changes to Vestige will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-02-20
+
+### Changed
+- **Tool consolidation: 23 → 18 tools** — merged redundant tools while maintaining 100% backward compatibility via deprecated redirects
+- **`ingest` → `smart_ingest`** — `ingest` was a duplicate of `smart_ingest`; now redirects automatically
+- **`session_checkpoint` → `smart_ingest` batch mode** — new `items` parameter on `smart_ingest` accepts up to 20 items, each running the full cognitive pipeline (importance scoring, intent detection, synaptic tagging, hippocampal indexing). Old `session_checkpoint` skipped the cognitive pipeline.
+- **`promote_memory` + `demote_memory` → `memory` unified** — new `promote` and `demote` actions on the `memory` tool with optional `reason` parameter and full cognitive feedback pipeline (reward signal, reconsolidation, competition)
+- **`health_check` + `stats` → `system_status`** — single tool returns combined health status, full statistics, FSRS preview, cognitive module health, state distribution, warnings, and recommendations
+- **CLAUDE.md automation overhaul** — all 18 tools now have explicit auto-trigger rules; session start expanded to 5 steps (added `system_status` + `predict`); full proactive behaviors table
+
+### Added
+- `smart_ingest` batch mode with `items` parameter (max 20 items, full cognitive pipeline per item)
+- `memory` actions: `promote` and `demote` with optional `reason` parameter
+- `system_status` tool combining health check + statistics + cognitive health
+- 30 new tests (305 → 335)
+
+### Deprecated (still work via redirects)
+- `ingest` → use `smart_ingest`
+- `session_checkpoint` → use `smart_ingest` with `items`
+- `promote_memory` → use `memory(action="promote")`
+- `demote_memory` → use `memory(action="demote")`
+- `health_check` → use `system_status`
+- `stats` → use `system_status`
+
+---
+
 ## [1.6.0] - 2026-02-19
 
 ### Changed

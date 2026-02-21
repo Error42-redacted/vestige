@@ -29,6 +29,11 @@ pub const MIGRATIONS: &[Migration] = &[
         description: "FSRS-6 upgrade: access history, ACT-R activation, personalized decay",
         up: MIGRATION_V5_UP,
     },
+    Migration {
+        version: 6,
+        description: "Dream history persistence for automation triggers",
+        up: MIGRATION_V6_UP,
+    },
 ];
 
 /// A database migration
@@ -445,6 +450,26 @@ ALTER TABLE consolidation_history ADD COLUMN activations_computed INTEGER DEFAUL
 ALTER TABLE consolidation_history ADD COLUMN w20_optimized REAL;
 
 UPDATE schema_version SET version = 5, applied_at = datetime('now');
+"#;
+
+/// V6: Dream history persistence for automation triggers
+/// Dreams were in-memory only (MemoryDreamer.dream_history Vec<DreamResult> lost on restart).
+/// This table persists dream metadata so system_status can report when last dream ran.
+const MIGRATION_V6_UP: &str = r#"
+CREATE TABLE IF NOT EXISTS dream_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dreamed_at TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    memories_replayed INTEGER NOT NULL DEFAULT 0,
+    connections_found INTEGER NOT NULL DEFAULT 0,
+    insights_generated INTEGER NOT NULL DEFAULT 0,
+    memories_strengthened INTEGER NOT NULL DEFAULT 0,
+    memories_compressed INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_dream_history_dreamed_at ON dream_history(dreamed_at);
+
+UPDATE schema_version SET version = 6, applied_at = datetime('now');
 "#;
 
 /// Get current schema version from database

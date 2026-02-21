@@ -121,8 +121,8 @@ impl McpServer {
                  recall past knowledge, and maintain context across sessions. The system uses \
                  FSRS-6 spaced repetition to naturally decay memories over time. \
                  \n\nFeedback Protocol: If the user explicitly confirms a memory was helpful, use \
-                 promote_memory. If they correct a hallucination or say a memory was wrong, use \
-                 demote_memory. Do not ask for permission - just act on their feedback.".to_string()
+                 memory(action='promote'). If they correct a hallucination or say a memory was wrong, use \
+                 memory(action='demote'). Do not ask for permission - just act on their feedback.".to_string()
             ),
         };
 
@@ -131,20 +131,19 @@ impl McpServer {
 
     /// Handle tools/list request
     async fn handle_tools_list(&self) -> Result<serde_json::Value, JsonRpcError> {
-        // v1.1: Only expose 8 core tools. Deprecated tools still work internally
-        // for backward compatibility but are not listed.
+        // v1.7: 18 tools. Deprecated tools still work via redirects in handle_tools_call.
         let tools = vec![
             // ================================================================
             // UNIFIED TOOLS (v1.1+)
             // ================================================================
             ToolDescription {
                 name: "search".to_string(),
-                description: Some("Unified search tool. Uses hybrid search (keyword + semantic + RRF fusion) internally. Auto-strengthens memories on access (Testing Effect).".to_string()),
+                description: Some("Unified search tool. Uses hybrid search (keyword + semantic + convex combination fusion) internally. Auto-strengthens memories on access (Testing Effect).".to_string()),
                 input_schema: tools::search_unified::schema(),
             },
             ToolDescription {
                 name: "memory".to_string(),
-                description: Some("Unified memory management tool. Actions: 'get' (retrieve full node), 'delete' (remove memory), 'state' (get accessibility state).".to_string()),
+                description: Some("Unified memory management tool. Actions: 'get' (retrieve full node), 'delete' (remove memory), 'state' (get accessibility state), 'promote' (thumbs up — increases retrieval strength), 'demote' (thumbs down — decreases retrieval strength, does NOT delete).".to_string()),
                 input_schema: tools::memory_unified::schema(),
             },
             ToolDescription {
@@ -158,30 +157,12 @@ impl McpServer {
                 input_schema: tools::intention_unified::schema(),
             },
             // ================================================================
-            // Core memory tools
+            // CORE MEMORY (v1.7: smart_ingest absorbs ingest + checkpoint)
             // ================================================================
-            ToolDescription {
-                name: "ingest".to_string(),
-                description: Some("Add new knowledge to memory. Use for facts, concepts, decisions, or any information worth remembering.".to_string()),
-                input_schema: tools::ingest::schema(),
-            },
             ToolDescription {
                 name: "smart_ingest".to_string(),
-                description: Some("INTELLIGENT memory ingestion with Prediction Error Gating. Automatically decides whether to CREATE new, UPDATE existing, or SUPERSEDE outdated memories based on semantic similarity. Solves the 'bad vs good similar memory' problem.".to_string()),
+                description: Some("INTELLIGENT memory ingestion with Prediction Error Gating. Single mode: provide 'content' to auto-decide CREATE/UPDATE/SUPERSEDE. Batch mode: provide 'items' array (max 20) for session-end saves — each item runs the full cognitive pipeline (importance scoring, intent detection, synaptic tagging).".to_string()),
                 input_schema: tools::smart_ingest::schema(),
-            },
-            // ================================================================
-            // Feedback tools
-            // ================================================================
-            ToolDescription {
-                name: "promote_memory".to_string(),
-                description: Some("Promote a memory (thumbs up). Use when a memory led to a good outcome. Increases retrieval strength so it surfaces more often.".to_string()),
-                input_schema: tools::feedback::promote_schema(),
-            },
-            ToolDescription {
-                name: "demote_memory".to_string(),
-                description: Some("Demote a memory (thumbs down). Use when a memory led to a bad outcome or was wrong. Decreases retrieval strength so better alternatives surface. Does NOT delete.".to_string()),
-                input_schema: tools::feedback::demote_schema(),
             },
             // ================================================================
             // TEMPORAL TOOLS (v1.2+)
@@ -197,22 +178,17 @@ impl McpServer {
                 input_schema: tools::changelog::schema(),
             },
             // ================================================================
-            // MAINTENANCE TOOLS (v1.2+)
+            // MAINTENANCE TOOLS (v1.7: system_status replaces health_check + stats)
             // ================================================================
             ToolDescription {
-                name: "health_check".to_string(),
-                description: Some("System health status with warnings and recommendations. Returns status (healthy/degraded/critical/empty), stats, and actionable advice.".to_string()),
-                input_schema: tools::maintenance::health_check_schema(),
+                name: "system_status".to_string(),
+                description: Some("Combined system health and statistics. Returns status (healthy/degraded/critical/empty), full stats, FSRS preview, cognitive module health, state distribution, warnings, and recommendations.".to_string()),
+                input_schema: tools::maintenance::system_status_schema(),
             },
             ToolDescription {
                 name: "consolidate".to_string(),
                 description: Some("Run FSRS-6 memory consolidation cycle. Applies decay, generates embeddings, and performs maintenance. Use when memories seem stale.".to_string()),
                 input_schema: tools::maintenance::consolidate_schema(),
-            },
-            ToolDescription {
-                name: "stats".to_string(),
-                description: Some("Full memory system statistics including total count, retention distribution, embedding coverage, and cognitive state breakdown.".to_string()),
-                input_schema: tools::maintenance::stats_schema(),
             },
             ToolDescription {
                 name: "backup".to_string(),
@@ -236,11 +212,6 @@ impl McpServer {
                 name: "importance_score".to_string(),
                 description: Some("Score content importance using 4-channel neuroscience model (novelty/arousal/reward/attention). Returns composite score, channel breakdown, encoding boost, and explanations.".to_string()),
                 input_schema: tools::importance::schema(),
-            },
-            ToolDescription {
-                name: "session_checkpoint".to_string(),
-                description: Some("Batch save up to 20 items in one call. Each item routes through Prediction Error Gating (smart_ingest). Use at session end or before context compaction to save all unsaved work.".to_string()),
-                input_schema: tools::checkpoint::schema(),
             },
             ToolDescription {
                 name: "find_duplicates".to_string(),
@@ -300,15 +271,80 @@ impl McpServer {
             // UNIFIED TOOLS (v1.1+) - Preferred API
             // ================================================================
             "search" => tools::search_unified::execute(&self.storage, &self.cognitive, request.arguments).await,
-            "memory" => tools::memory_unified::execute(&self.storage, request.arguments).await,
+            "memory" => tools::memory_unified::execute(&self.storage, &self.cognitive, request.arguments).await,
             "codebase" => tools::codebase_unified::execute(&self.storage, &self.cognitive, request.arguments).await,
             "intention" => tools::intention_unified::execute(&self.storage, &self.cognitive, request.arguments).await,
 
             // ================================================================
-            // Core memory tools
+            // Core memory (v1.7: smart_ingest absorbs ingest + checkpoint)
             // ================================================================
-            "ingest" => tools::ingest::execute(&self.storage, &self.cognitive, request.arguments).await,
             "smart_ingest" => tools::smart_ingest::execute(&self.storage, &self.cognitive, request.arguments).await,
+
+            // ================================================================
+            // DEPRECATED (v1.7): ingest → smart_ingest
+            // ================================================================
+            "ingest" => {
+                warn!("Tool 'ingest' is deprecated in v1.7. Use 'smart_ingest' instead.");
+                tools::smart_ingest::execute(&self.storage, &self.cognitive, request.arguments).await
+            }
+
+            // ================================================================
+            // DEPRECATED (v1.7): session_checkpoint → smart_ingest (batch mode)
+            // ================================================================
+            "session_checkpoint" => {
+                warn!("Tool 'session_checkpoint' is deprecated in v1.7. Use 'smart_ingest' with 'items' parameter instead.");
+                tools::smart_ingest::execute(&self.storage, &self.cognitive, request.arguments).await
+            }
+
+            // ================================================================
+            // DEPRECATED (v1.7): promote_memory → memory(action='promote')
+            // ================================================================
+            "promote_memory" => {
+                warn!("Tool 'promote_memory' is deprecated in v1.7. Use 'memory' with action='promote' instead.");
+                let unified_args = match request.arguments {
+                    Some(ref args) => {
+                        let mut new_args = args.clone();
+                        if let Some(obj) = new_args.as_object_mut() {
+                            obj.insert("action".to_string(), serde_json::json!("promote"));
+                        }
+                        Some(new_args)
+                    }
+                    None => Some(serde_json::json!({"action": "promote"})),
+                };
+                tools::memory_unified::execute(&self.storage, &self.cognitive, unified_args).await
+            }
+            "demote_memory" => {
+                warn!("Tool 'demote_memory' is deprecated in v1.7. Use 'memory' with action='demote' instead.");
+                let unified_args = match request.arguments {
+                    Some(ref args) => {
+                        let mut new_args = args.clone();
+                        if let Some(obj) = new_args.as_object_mut() {
+                            obj.insert("action".to_string(), serde_json::json!("demote"));
+                        }
+                        Some(new_args)
+                    }
+                    None => Some(serde_json::json!({"action": "demote"})),
+                };
+                tools::memory_unified::execute(&self.storage, &self.cognitive, unified_args).await
+            }
+
+            // ================================================================
+            // DEPRECATED (v1.7): health_check, stats → system_status
+            // ================================================================
+            "health_check" => {
+                warn!("Tool 'health_check' is deprecated in v1.7. Use 'system_status' instead.");
+                tools::maintenance::execute_system_status(&self.storage, &self.cognitive, request.arguments).await
+            }
+            "stats" => {
+                warn!("Tool 'stats' is deprecated in v1.7. Use 'system_status' instead.");
+                tools::maintenance::execute_system_status(&self.storage, &self.cognitive, request.arguments).await
+            }
+
+            // ================================================================
+            // SYSTEM STATUS (v1.7: replaces health_check + stats)
+            // ================================================================
+            "system_status" => tools::maintenance::execute_system_status(&self.storage, &self.cognitive, request.arguments).await,
+
             "mark_reviewed" => tools::review::execute(&self.storage, request.arguments).await,
 
             // ================================================================
@@ -324,7 +360,6 @@ impl McpServer {
             // ================================================================
             "get_knowledge" => {
                 warn!("Tool 'get_knowledge' is deprecated. Use 'memory' with action='get' instead.");
-                // Transform arguments to unified format
                 let unified_args = match request.arguments {
                     Some(ref args) => {
                         let id = args.get("id").cloned().unwrap_or(serde_json::Value::Null);
@@ -335,11 +370,10 @@ impl McpServer {
                     }
                     None => None,
                 };
-                tools::memory_unified::execute(&self.storage, unified_args).await
+                tools::memory_unified::execute(&self.storage, &self.cognitive, unified_args).await
             }
             "delete_knowledge" => {
                 warn!("Tool 'delete_knowledge' is deprecated. Use 'memory' with action='delete' instead.");
-                // Transform arguments to unified format
                 let unified_args = match request.arguments {
                     Some(ref args) => {
                         let id = args.get("id").cloned().unwrap_or(serde_json::Value::Null);
@@ -350,11 +384,10 @@ impl McpServer {
                     }
                     None => None,
                 };
-                tools::memory_unified::execute(&self.storage, unified_args).await
+                tools::memory_unified::execute(&self.storage, &self.cognitive, unified_args).await
             }
             "get_memory_state" => {
                 warn!("Tool 'get_memory_state' is deprecated. Use 'memory' with action='state' instead.");
-                // Transform arguments to unified format
                 let unified_args = match request.arguments {
                     Some(ref args) => {
                         let id = args.get("memory_id").cloned().unwrap_or(serde_json::Value::Null);
@@ -365,7 +398,7 @@ impl McpServer {
                     }
                     None => None,
                 };
-                tools::memory_unified::execute(&self.storage, unified_args).await
+                tools::memory_unified::execute(&self.storage, &self.cognitive, unified_args).await
             }
 
             // ================================================================
@@ -373,7 +406,6 @@ impl McpServer {
             // ================================================================
             "remember_pattern" => {
                 warn!("Tool 'remember_pattern' is deprecated. Use 'codebase' with action='remember_pattern' instead.");
-                // Transform arguments to unified format
                 let unified_args = match request.arguments {
                     Some(ref args) => {
                         let mut new_args = args.clone();
@@ -388,7 +420,6 @@ impl McpServer {
             }
             "remember_decision" => {
                 warn!("Tool 'remember_decision' is deprecated. Use 'codebase' with action='remember_decision' instead.");
-                // Transform arguments to unified format
                 let unified_args = match request.arguments {
                     Some(ref args) => {
                         let mut new_args = args.clone();
@@ -403,7 +434,6 @@ impl McpServer {
             }
             "get_codebase_context" => {
                 warn!("Tool 'get_codebase_context' is deprecated. Use 'codebase' with action='get_context' instead.");
-                // Transform arguments to unified format
                 let unified_args = match request.arguments {
                     Some(ref args) => {
                         let mut new_args = args.clone();
@@ -422,7 +452,6 @@ impl McpServer {
             // ================================================================
             "set_intention" => {
                 warn!("Tool 'set_intention' is deprecated. Use 'intention' with action='set' instead.");
-                // Transform arguments to unified format
                 let unified_args = match request.arguments {
                     Some(ref args) => {
                         let mut new_args = args.clone();
@@ -437,7 +466,6 @@ impl McpServer {
             }
             "check_intentions" => {
                 warn!("Tool 'check_intentions' is deprecated. Use 'intention' with action='check' instead.");
-                // Transform arguments to unified format
                 let unified_args = match request.arguments {
                     Some(ref args) => {
                         let mut new_args = args.clone();
@@ -452,7 +480,6 @@ impl McpServer {
             }
             "complete_intention" => {
                 warn!("Tool 'complete_intention' is deprecated. Use 'intention' with action='update', status='complete' instead.");
-                // Transform arguments to unified format
                 let unified_args = match request.arguments {
                     Some(ref args) => {
                         let id = args.get("intentionId").cloned().unwrap_or(serde_json::Value::Null);
@@ -468,7 +495,6 @@ impl McpServer {
             }
             "snooze_intention" => {
                 warn!("Tool 'snooze_intention' is deprecated. Use 'intention' with action='update', status='snooze' instead.");
-                // Transform arguments to unified format
                 let unified_args = match request.arguments {
                     Some(ref args) => {
                         let id = args.get("intentionId").cloned().unwrap_or(serde_json::Value::Null);
@@ -486,13 +512,11 @@ impl McpServer {
             }
             "list_intentions" => {
                 warn!("Tool 'list_intentions' is deprecated. Use 'intention' with action='list' instead.");
-                // Transform arguments to unified format
                 let unified_args = match request.arguments {
                     Some(ref args) => {
                         let mut new_args = args.clone();
                         if let Some(obj) = new_args.as_object_mut() {
                             obj.insert("action".to_string(), serde_json::json!("list"));
-                            // Rename 'status' to 'filter_status' if present
                             if let Some(status) = obj.remove("status") {
                                 obj.insert("filter_status".to_string(), status);
                             }
@@ -505,12 +529,7 @@ impl McpServer {
             }
 
             // ================================================================
-            // Stats and maintenance - REMOVED from MCP in v1.1
-            // Use CLI instead: vestige stats, vestige health, vestige consolidate
-            // ================================================================
-
-            // ================================================================
-            // Neuroscience tools (not deprecated, except get_memory_state above)
+            // Neuroscience tools (internal, not in tools/list)
             // ================================================================
             "list_by_state" => tools::memory_states::execute_list(&self.storage, request.arguments).await,
             "state_stats" => tools::memory_states::execute_stats(&self.storage).await,
@@ -520,10 +539,8 @@ impl McpServer {
             "match_context" => tools::context::execute(&self.storage, request.arguments).await,
 
             // ================================================================
-            // Feedback / preference learning (not deprecated)
+            // Feedback (internal, still used by request_feedback)
             // ================================================================
-            "promote_memory" => tools::feedback::execute_promote(&self.storage, &self.cognitive, request.arguments).await,
-            "demote_memory" => tools::feedback::execute_demote(&self.storage, &self.cognitive, request.arguments).await,
             "request_feedback" => tools::feedback::execute_request_feedback(&self.storage, request.arguments).await,
 
             // ================================================================
@@ -533,11 +550,9 @@ impl McpServer {
             "memory_changelog" => tools::changelog::execute(&self.storage, request.arguments).await,
 
             // ================================================================
-            // MAINTENANCE TOOLS (v1.2+)
+            // MAINTENANCE TOOLS (v1.2+, non-deprecated)
             // ================================================================
-            "health_check" => tools::maintenance::execute_health_check(&self.storage, request.arguments).await,
             "consolidate" => tools::maintenance::execute_consolidate(&self.storage, request.arguments).await,
-            "stats" => tools::maintenance::execute_stats(&self.storage, &self.cognitive, request.arguments).await,
             "backup" => tools::maintenance::execute_backup(&self.storage, request.arguments).await,
             "export" => tools::maintenance::execute_export(&self.storage, request.arguments).await,
             "gc" => tools::maintenance::execute_gc(&self.storage, request.arguments).await,
@@ -546,7 +561,6 @@ impl McpServer {
             // AUTO-SAVE & DEDUP TOOLS (v1.3+)
             // ================================================================
             "importance_score" => tools::importance::execute(&self.storage, &self.cognitive, request.arguments).await,
-            "session_checkpoint" => tools::checkpoint::execute(&self.storage, request.arguments).await,
             "find_duplicates" => tools::dedup::execute(&self.storage, request.arguments).await,
 
             // ================================================================
@@ -899,8 +913,8 @@ mod tests {
         let result = response.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
 
-        // v1.3+: 19 tools (8 unified + 2 temporal + 6 maintenance + 3 auto-save/dedup)
-        assert_eq!(tools.len(), 23, "Expected exactly 23 tools in v1.5+");
+        // v1.7: 18 tools (4 unified + 1 core + 2 temporal + 5 maintenance + 2 auto-save + 3 cognitive + 1 restore)
+        assert_eq!(tools.len(), 18, "Expected exactly 18 tools in v1.7+");
 
         let tool_names: Vec<&str> = tools
             .iter()
@@ -913,29 +927,30 @@ mod tests {
         assert!(tool_names.contains(&"codebase"));
         assert!(tool_names.contains(&"intention"));
 
-        // Core tools
-        assert!(tool_names.contains(&"ingest"));
+        // Core memory (smart_ingest absorbs ingest + checkpoint in v1.7)
         assert!(tool_names.contains(&"smart_ingest"));
+        assert!(!tool_names.contains(&"ingest"), "ingest should be removed in v1.7");
+        assert!(!tool_names.contains(&"session_checkpoint"), "session_checkpoint should be removed in v1.7");
 
-        // Feedback tools
-        assert!(tool_names.contains(&"promote_memory"));
-        assert!(tool_names.contains(&"demote_memory"));
+        // Feedback merged into memory tool (v1.7)
+        assert!(!tool_names.contains(&"promote_memory"), "promote_memory should be removed in v1.7");
+        assert!(!tool_names.contains(&"demote_memory"), "demote_memory should be removed in v1.7");
 
         // Temporal tools (v1.2)
         assert!(tool_names.contains(&"memory_timeline"));
         assert!(tool_names.contains(&"memory_changelog"));
 
-        // Maintenance tools (v1.2)
-        assert!(tool_names.contains(&"health_check"));
+        // Maintenance tools (v1.7: system_status replaces health_check + stats)
+        assert!(tool_names.contains(&"system_status"));
+        assert!(!tool_names.contains(&"health_check"), "health_check should be removed in v1.7");
+        assert!(!tool_names.contains(&"stats"), "stats should be removed in v1.7");
         assert!(tool_names.contains(&"consolidate"));
-        assert!(tool_names.contains(&"stats"));
         assert!(tool_names.contains(&"backup"));
         assert!(tool_names.contains(&"export"));
         assert!(tool_names.contains(&"gc"));
 
         // Auto-save & dedup tools (v1.3)
         assert!(tool_names.contains(&"importance_score"));
-        assert!(tool_names.contains(&"session_checkpoint"));
         assert!(tool_names.contains(&"find_duplicates"));
 
         // Cognitive tools (v1.5)

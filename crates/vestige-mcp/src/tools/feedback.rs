@@ -280,7 +280,7 @@ pub async fn execute_request_feedback(
                 "description": "Give Claude a custom instruction (e.g., 'update this memory', 'merge with X', 'add tag Y')"
             }
         ],
-        "instruction": "PRESENT THESE OPTIONS TO THE USER. If they choose A, call promote_memory. If B, call demote_memory. If C, they will provide a custom instruction - execute it (could be: update the memory content, delete it, merge it, add tags, research something, etc.)."
+        "instruction": "PRESENT THESE OPTIONS TO THE USER. If they choose A, call memory(action='promote'). If B, call memory(action='demote'). If C, they will provide a custom instruction - execute it (could be: update the memory content, delete it, merge it, add tags, research something, etc.)."
     }))
 }
 

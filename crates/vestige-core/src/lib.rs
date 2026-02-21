@@ -138,8 +138,8 @@ pub use fsrs::{
 
 // Storage layer
 pub use storage::{
-    ConsolidationHistoryRecord, InsightRecord, IntentionRecord, Result, SmartIngestResult,
-    StateTransitionRecord, Storage, StorageError,
+    ConsolidationHistoryRecord, DreamHistoryRecord, InsightRecord, IntentionRecord, Result,
+    SmartIngestResult, StateTransitionRecord, Storage, StorageError,
 };
 
 // Consolidation (sleep-inspired memory processing)

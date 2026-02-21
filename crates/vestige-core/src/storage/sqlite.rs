@@ -140,7 +140,10 @@ impl Storage {
              PRAGMA cache_size = -64000;
              PRAGMA temp_store = MEMORY;
              PRAGMA foreign_keys = ON;
-             PRAGMA busy_timeout = 5000;",
+             PRAGMA busy_timeout = 5000;
+             PRAGMA mmap_size = 268435456;
+             PRAGMA journal_size_limit = 67108864;
+             PRAGMA optimize = 0x10002;",
         )?;
 
         #[cfg(feature = "embeddings")]
@@ -1851,6 +1854,14 @@ impl Storage {
         // 15. Connection Graph Maintenance (decay + prune weak connections)
         let _connections_pruned = self.prune_weak_connections(0.05).unwrap_or(0) as i64;
 
+        // 16. FTS5 index optimization — merge segments for faster keyword search
+        let _ = self.conn.execute_batch(
+            "INSERT INTO knowledge_fts(knowledge_fts) VALUES('optimize');"
+        );
+
+        // 17. Run PRAGMA optimize to refresh query planner statistics
+        let _ = self.conn.execute_batch("PRAGMA optimize;");
+
         let duration = start.elapsed().as_millis() as i64;
 
         // Record consolidation history (bug fix: was never recorded before v1.4.0)
@@ -2308,6 +2319,18 @@ pub struct ConsolidationHistoryRecord {
     pub connections_strengthened: i32,
     pub connections_pruned: i32,
     pub insights_generated: i32,
+}
+
+/// Dream history record — persists dream metadata for automation triggers
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DreamHistoryRecord {
+    pub dreamed_at: DateTime<Utc>,
+    pub duration_ms: i64,
+    pub memories_replayed: i32,
+    pub connections_found: i32,
+    pub insights_generated: i32,
+    pub memories_strengthened: i32,
+    pub memories_compressed: i32,
 }
 
 impl Storage {
@@ -2850,6 +2873,84 @@ impl Storage {
     }
 
     // ========================================================================
+    // DREAM HISTORY PERSISTENCE
+    // ========================================================================
+
+    /// Save a dream history record
+    pub fn save_dream_history(&mut self, record: &DreamHistoryRecord) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO dream_history (
+                dreamed_at, duration_ms, memories_replayed, connections_found,
+                insights_generated, memories_strengthened, memories_compressed
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                record.dreamed_at.to_rfc3339(),
+                record.duration_ms,
+                record.memories_replayed,
+                record.connections_found,
+                record.insights_generated,
+                record.memories_strengthened,
+                record.memories_compressed,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Get last dream timestamp
+    pub fn get_last_dream(&self) -> Result<Option<DateTime<Utc>>> {
+        let result: Option<String> = self.conn.query_row(
+            "SELECT MAX(dreamed_at) FROM dream_history",
+            [],
+            |row| row.get(0),
+        ).ok().flatten();
+
+        Ok(result.and_then(|s| {
+            DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&Utc))
+        }))
+    }
+
+    /// Count memories created since a given timestamp
+    pub fn count_memories_since(&self, since: DateTime<Utc>) -> Result<i64> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM knowledge_nodes WHERE created_at >= ?1",
+            params![since.to_rfc3339()],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Get last backup timestamp by scanning the backups directory.
+    /// Parses `vestige-YYYYMMDD-HHMMSS.db` filenames.
+    pub fn get_last_backup_timestamp() -> Option<DateTime<Utc>> {
+        let proj_dirs = directories::ProjectDirs::from("com", "vestige", "core")?;
+        let backup_dir = proj_dirs.data_dir().parent()?.join("backups");
+
+        if !backup_dir.exists() {
+            return None;
+        }
+
+        let mut latest: Option<DateTime<Utc>> = None;
+
+        if let Ok(entries) = std::fs::read_dir(&backup_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                // Parse vestige-YYYYMMDD-HHMMSS.db
+                if let Some(ts_part) = name_str.strip_prefix("vestige-").and_then(|s| s.strip_suffix(".db")) {
+                    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(ts_part, "%Y%m%d-%H%M%S") {
+                        let dt = naive.and_utc();
+                        if latest.as_ref().is_none_or(|l| dt > *l) {
+                            latest = Some(dt);
+                        }
+                    }
+                }
+            }
+        }
+
+        latest
+    }
+
+    // ========================================================================
     // STATE TRANSITIONS (Audit Trail)
     // ========================================================================
 
@@ -3008,5 +3109,64 @@ mod tests {
         let deleted = storage.delete_node(&node.id).unwrap();
         assert!(deleted);
         assert!(storage.get_node(&node.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_dream_history_save_and_get_last() {
+        let mut storage = create_test_storage();
+        let now = Utc::now();
+
+        let record = DreamHistoryRecord {
+            dreamed_at: now,
+            duration_ms: 1500,
+            memories_replayed: 50,
+            connections_found: 12,
+            insights_generated: 3,
+            memories_strengthened: 8,
+            memories_compressed: 2,
+        };
+
+        let id = storage.save_dream_history(&record).unwrap();
+        assert!(id > 0);
+
+        let last = storage.get_last_dream().unwrap();
+        assert!(last.is_some());
+        // Timestamps should be within 1 second (RFC3339 round-trip)
+        let diff = (last.unwrap() - now).num_seconds().abs();
+        assert!(diff <= 1, "Timestamp mismatch: diff={}s", diff);
+    }
+
+    #[test]
+    fn test_dream_history_empty() {
+        let storage = create_test_storage();
+        let last = storage.get_last_dream().unwrap();
+        assert!(last.is_none());
+    }
+
+    #[test]
+    fn test_count_memories_since() {
+        let mut storage = create_test_storage();
+        let before = Utc::now() - Duration::seconds(10);
+
+        for i in 0..5 {
+            storage.ingest(IngestInput {
+                content: format!("Count test memory {}", i),
+                node_type: "fact".to_string(),
+                ..Default::default()
+            }).unwrap();
+        }
+
+        let count = storage.count_memories_since(before).unwrap();
+        assert_eq!(count, 5);
+
+        let future = Utc::now() + Duration::hours(1);
+        let count_future = storage.count_memories_since(future).unwrap();
+        assert_eq!(count_future, 0);
+    }
+
+    #[test]
+    fn test_get_last_backup_timestamp_no_panic() {
+        // Static method should not panic even if no backups exist
+        let _ = Storage::get_last_backup_timestamp();
     }
 }
