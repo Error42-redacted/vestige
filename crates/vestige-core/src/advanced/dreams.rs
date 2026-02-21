@@ -84,6 +84,9 @@ const DEFAULT_ACTIVITY_WINDOW_SECS: i64 = 300;
 /// Minimum idle time before consolidation can run (30 minutes)
 const MIN_IDLE_TIME_FOR_CONSOLIDATION_MINS: i64 = 30;
 
+/// Minimum brief idle time for force/mini consolidation triggers (5 minutes)
+const MIN_BRIEF_IDLE_MINS: i64 = 5;
+
 /// Connection strength decay factor
 const CONNECTION_DECAY_FACTOR: f64 = 0.95;
 
@@ -270,13 +273,20 @@ impl ConsolidationScheduler {
             return true;
         }
 
-        // Trigger 2: >6h stale (force consolidation regardless of idle)
-        if time_since_last >= Duration::hours(6) {
+        // Brief idle: no activity in the last 5 minutes (shorter than full idle)
+        let briefly_idle = self
+            .activity_tracker
+            .time_since_last_activity()
+            .map(|d| d >= Duration::minutes(MIN_BRIEF_IDLE_MINS))
+            .unwrap_or(true); // No activity ever = idle
+
+        // Trigger 2: >6h stale — force during any idle period (even brief)
+        if time_since_last >= Duration::hours(6) && briefly_idle {
             return true;
         }
 
-        // Trigger 3: Mini-consolidation every 2h if active
-        if time_since_last >= Duration::hours(2) && !is_idle {
+        // Trigger 3: Mini-consolidation every 2h during brief lulls (5-30 min idle)
+        if time_since_last >= Duration::hours(2) && briefly_idle && !is_idle {
             return true;
         }
 
