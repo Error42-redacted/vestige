@@ -5,7 +5,6 @@
 
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use vestige_core::{
     CaptureWindow, ImportanceEvent, ImportanceEventType,
@@ -71,7 +70,7 @@ pub fn stats_schema() -> Value {
 
 /// Trigger an importance event to retroactively strengthen recent memories
 pub async fn execute_trigger(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args = args.ok_or("Missing arguments")?;
@@ -88,7 +87,6 @@ pub async fn execute_trigger(
     let hours_back = args["hours_back"].as_f64().unwrap_or(9.0);
     let hours_forward = args["hours_forward"].as_f64().unwrap_or(2.0);
 
-    let storage = storage.lock().await;
 
     // Verify the trigger memory exists
     let trigger_memory = storage.get_node(memory_id)
@@ -158,7 +156,7 @@ pub async fn execute_trigger(
 
 /// Find memories with active synaptic tags
 pub async fn execute_find(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args = args.unwrap_or(serde_json::json!({}));
@@ -166,7 +164,6 @@ pub async fn execute_find(
     let min_strength = args["min_strength"].as_f64().unwrap_or(0.3);
     let limit = args["limit"].as_i64().unwrap_or(20) as usize;
 
-    let storage = storage.lock().await;
 
     // Get memories with high retention (proxy for "tagged")
     let memories = storage.get_all_nodes(200, 0)
@@ -196,9 +193,8 @@ pub async fn execute_find(
 
 /// Get synaptic tagging statistics
 pub async fn execute_stats(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
 ) -> Result<Value, String> {
-    let storage = storage.lock().await;
 
     let memories = storage.get_all_nodes(500, 0)
         .map_err(|e| e.to_string())?;

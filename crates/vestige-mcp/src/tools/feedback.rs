@@ -61,7 +61,7 @@ struct FeedbackArgs {
 
 /// Promote a memory (thumbs up) - it led to a good outcome
 pub async fn execute_promote(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: Option<Value>,
 ) -> Result<Value, String> {
@@ -73,14 +73,12 @@ pub async fn execute_promote(
     // Validate UUID
     uuid::Uuid::parse_str(&args.id).map_err(|_| "Invalid node ID format".to_string())?;
 
-    let storage_guard = storage.lock().await;
 
     // Get node before for comparison
-    let before = storage_guard.get_node(&args.id).map_err(|e| e.to_string())?
+    let before = storage.get_node(&args.id).map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Node not found: {}", args.id))?;
 
-    let node = storage_guard.promote_memory(&args.id).map_err(|e| e.to_string())?;
-    drop(storage_guard);
+    let node = storage.promote_memory(&args.id).map_err(|e| e.to_string())?;
 
     // ====================================================================
     // COGNITIVE FEEDBACK PIPELINE (promote)
@@ -133,7 +131,7 @@ pub async fn execute_promote(
 
 /// Demote a memory (thumbs down) - it led to a bad outcome
 pub async fn execute_demote(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: Option<Value>,
 ) -> Result<Value, String> {
@@ -145,14 +143,12 @@ pub async fn execute_demote(
     // Validate UUID
     uuid::Uuid::parse_str(&args.id).map_err(|_| "Invalid node ID format".to_string())?;
 
-    let storage_guard = storage.lock().await;
 
     // Get node before for comparison
-    let before = storage_guard.get_node(&args.id).map_err(|e| e.to_string())?
+    let before = storage.get_node(&args.id).map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Node not found: {}", args.id))?;
 
-    let node = storage_guard.demote_memory(&args.id).map_err(|e| e.to_string())?;
-    drop(storage_guard);
+    let node = storage.demote_memory(&args.id).map_err(|e| e.to_string())?;
 
     // ====================================================================
     // COGNITIVE FEEDBACK PIPELINE (demote)
@@ -230,7 +226,7 @@ struct RequestFeedbackArgs {
 /// Request feedback from the user about a memory's usefulness
 /// Returns a structured prompt for Claude to ask the user
 pub async fn execute_request_feedback(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: RequestFeedbackArgs = match args {
@@ -241,7 +237,6 @@ pub async fn execute_request_feedback(
     // Validate UUID
     uuid::Uuid::parse_str(&args.id).map_err(|_| "Invalid node ID format".to_string())?;
 
-    let storage = storage.lock().await;
 
     let node = storage.get_node(&args.id).map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Node not found: {}", args.id))?;
@@ -294,15 +289,14 @@ mod tests {
         Arc::new(Mutex::new(CognitiveEngine::new()))
     }
 
-    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+    async fn test_storage() -> (Arc<Storage>, TempDir) {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
-    async fn ingest_test_memory(storage: &Arc<Mutex<Storage>>) -> String {
-        let mut s = storage.lock().await;
-        let node = s
+    async fn ingest_test_memory(storage: &Arc<Storage>) -> String {
+        let node = storage
             .ingest(vestige_core::IngestInput {
                 content: "Test memory for feedback".to_string(),
                 node_type: "fact".to_string(),
@@ -542,8 +536,7 @@ mod tests {
     async fn test_request_feedback_truncates_long_content() {
         let (storage, _dir) = test_storage().await;
         let long_content = "A".repeat(200);
-        let mut s = storage.lock().await;
-        let node = s
+        let node = storage
             .ingest(vestige_core::IngestInput {
                 content: long_content,
                 node_type: "fact".to_string(),
@@ -555,9 +548,9 @@ mod tests {
                 valid_until: None,
             })
             .unwrap();
-        drop(s);
+        let node_id = node.id.clone();
 
-        let args = serde_json::json!({ "id": node.id });
+        let args = serde_json::json!({ "id": node_id });
         let result = execute_request_feedback(&storage, Some(args)).await;
         let value = result.unwrap();
         let preview = value["memoryPreview"].as_str().unwrap();

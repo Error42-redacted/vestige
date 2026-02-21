@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
 
 use vestige_core::Storage;
 #[cfg(all(feature = "embeddings", feature = "vector-search"))]
@@ -89,7 +89,7 @@ impl UnionFind {
 }
 
 pub async fn execute(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: DedupArgs = match args {
@@ -107,7 +107,6 @@ pub async fn execute(
 
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
     {
-        let storage = storage.lock().await;
 
         // Load all embeddings
         let all_embeddings = storage
@@ -300,7 +299,7 @@ mod tests {
     async fn test_empty_storage() {
         let dir = tempfile::TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        let storage = Arc::new(Mutex::new(storage));
+        let storage = Arc::new(storage);
         let result = execute(&storage, None).await;
         assert!(result.is_ok());
     }

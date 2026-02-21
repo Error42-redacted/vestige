@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
 use uuid::Uuid;
 
 use vestige_core::Storage;
@@ -55,7 +55,7 @@ struct ChangelogArgs {
 
 /// Execute memory_changelog tool
 pub async fn execute(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: ChangelogArgs = match args {
@@ -69,7 +69,6 @@ pub async fn execute(
     };
 
     let limit = args.limit.unwrap_or(20).clamp(1, 100);
-    let storage = storage.lock().await;
 
     if let Some(ref memory_id) = args.memory_id {
         // Per-memory mode: state transitions for a specific memory
@@ -196,15 +195,14 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+    async fn test_storage() -> (Arc<Storage>, TempDir) {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
-    async fn ingest_test_memory(storage: &Arc<Mutex<Storage>>) -> String {
-        let mut s = storage.lock().await;
-        let node = s
+    async fn ingest_test_memory(storage: &Arc<Storage>) -> String {
+        let node = storage
             .ingest(vestige_core::IngestInput {
                 content: "Changelog test memory".to_string(),
                 node_type: "fact".to_string(),

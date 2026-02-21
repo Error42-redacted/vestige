@@ -5,6 +5,30 @@ All notable changes to Vestige will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-02-21
+
+### Added
+- **`session_context` tool** — one-call session initialization replacing 5 separate calls (search × 2, intention check, system_status, predict). Token-budgeted responses (~15K tokens → ~500-1000 tokens). Returns assembled markdown context, `automationTriggers` (needsDream/needsBackup/needsGc), and `expandable` memory IDs for on-demand retrieval.
+- **`token_budget` parameter on `search`** — limits response size (100-10000 tokens). Results exceeding budget moved to `expandable` array with `tokensUsed`/`tokenBudget` tracking.
+- **Reader/writer connection split** — `Storage` struct uses `Mutex<Connection>` for separate reader/writer SQLite handles with WAL mode. All methods take `&self` (interior mutability). `Arc<Mutex<Storage>>` → `Arc<Storage>` across ~30 files.
+- **int8 vector quantization** — `ScalarKind::F16` → `I8` (2x memory savings, <1% recall loss)
+- **Migration v7** — FTS5 porter tokenizer (15-30% keyword recall) + page_size 8192 (10-30% faster large-row reads)
+- 22 new tests for session_context and token_budget (335 → 357 mcp tests, 651 total)
+
+### Changed
+- Tool count: 18 → 19
+- `EmbeddingService::init()` changed from `&mut self` to `&self` (dead `model_loaded` field removed)
+- CLAUDE.md updated: session start uses `session_context`, 19 tools documented, development section reflects storage architecture
+
+### Performance
+- Session init: ~15K tokens → ~500-1000 tokens (single tool call)
+- Vector storage: 2x reduction (F16 → I8)
+- Keyword search: 15-30% better recall (FTS5 porter stemming)
+- Large-row reads: 10-30% faster (page_size 8192)
+- Concurrent reads: non-blocking (reader/writer WAL split)
+
+---
+
 ## [1.7.0] - 2026-02-20
 
 ### Changed

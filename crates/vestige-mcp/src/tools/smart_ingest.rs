@@ -114,7 +114,7 @@ struct BatchItem {
 }
 
 pub async fn execute(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: Option<Value>,
 ) -> Result<Value, String> {
@@ -184,16 +184,14 @@ pub async fn execute(
     // ====================================================================
     // INGEST (storage lock)
     // ====================================================================
-    let mut storage_guard = storage.lock().await;
 
     // Check if force_create is enabled
     if args.force_create.unwrap_or(false) {
-        let node = storage_guard.ingest(input).map_err(|e| e.to_string())?;
+        let node = storage.ingest(input).map_err(|e| e.to_string())?;
         let node_id = node.id.clone();
         let node_content = node.content.clone();
         let node_type = node.node_type.clone();
         let has_embedding = node.has_embedding.unwrap_or(false);
-        drop(storage_guard);
 
         // Post-ingest cognitive side effects
         run_post_ingest(cognitive, &node_id, &node_content, &node_type, importance_composite);
@@ -213,12 +211,11 @@ pub async fn execute(
     // Use smart ingest with prediction error gating
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
     {
-        let result = storage_guard.smart_ingest(input).map_err(|e| e.to_string())?;
+        let result = storage.smart_ingest(input).map_err(|e| e.to_string())?;
         let node_id = result.node.id.clone();
         let node_content = result.node.content.clone();
         let node_type = result.node.node_type.clone();
         let has_embedding = result.node.has_embedding.unwrap_or(false);
-        drop(storage_guard);
 
         // Post-ingest cognitive side effects
         run_post_ingest(cognitive, &node_id, &node_content, &node_type, importance_composite);
@@ -249,11 +246,10 @@ pub async fn execute(
 
     #[cfg(not(all(feature = "embeddings", feature = "vector-search")))]
     {
-        let node = storage_guard.ingest(input).map_err(|e| e.to_string())?;
+        let node = storage.ingest(input).map_err(|e| e.to_string())?;
         let node_id = node.id.clone();
         let node_content = node.content.clone();
         let node_type = node.node_type.clone();
-        drop(storage_guard);
 
         run_post_ingest(cognitive, &node_id, &node_content, &node_type, importance_composite);
 
@@ -276,7 +272,7 @@ pub async fn execute(
 /// pre-ingest (importance scoring, intent detection) and post-ingest (synaptic
 /// tagging, novelty update, hippocampal indexing) pipelines per item.
 async fn execute_batch(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     items: Vec<BatchItem>,
 ) -> Result<Value, String> {
@@ -355,16 +351,14 @@ async fn execute_batch(
         // ================================================================
         // INGEST (storage lock per item)
         // ================================================================
-        let mut storage_guard = storage.lock().await;
 
         #[cfg(all(feature = "embeddings", feature = "vector-search"))]
         {
-            match storage_guard.smart_ingest(input) {
+            match storage.smart_ingest(input) {
                 Ok(result) => {
                     let node_id = result.node.id.clone();
                     let node_content = result.node.content.clone();
                     let node_type = result.node.node_type.clone();
-                    drop(storage_guard);
 
                     match result.decision.as_str() {
                         "create" | "supersede" | "replace" => created += 1,
@@ -386,7 +380,6 @@ async fn execute_batch(
                     }));
                 }
                 Err(e) => {
-                    drop(storage_guard);
                     errors += 1;
                     results.push(serde_json::json!({
                         "index": i,
@@ -399,12 +392,11 @@ async fn execute_batch(
 
         #[cfg(not(all(feature = "embeddings", feature = "vector-search")))]
         {
-            match storage_guard.ingest(input) {
+            match storage.ingest(input) {
                 Ok(node) => {
                     let node_id = node.id.clone();
                     let node_content = node.content.clone();
                     let node_type = node.node_type.clone();
-                    drop(storage_guard);
 
                     created += 1;
                     run_post_ingest(cognitive, &node_id, &node_content, &node_type, importance_composite);
@@ -419,7 +411,6 @@ async fn execute_batch(
                     }));
                 }
                 Err(e) => {
-                    drop(storage_guard);
                     errors += 1;
                     results.push(serde_json::json!({
                         "index": i,
@@ -498,10 +489,10 @@ mod tests {
     }
 
     /// Create a test storage instance with a temporary database
-    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+    async fn test_storage() -> (Arc<Storage>, TempDir) {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
     #[tokio::test]
@@ -662,8 +653,7 @@ mod tests {
         let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
         let node_id = result.unwrap()["nodeId"].as_str().unwrap().to_string();
-        let storage_lock = storage.lock().await;
-        let node = storage_lock.get_node(&node_id).unwrap().unwrap();
+        let node = storage.get_node(&node_id).unwrap().unwrap();
         assert_eq!(node.node_type, "fact");
     }
 

@@ -5,7 +5,6 @@
 
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use vestige_core::{MemoryState, Storage};
 
@@ -77,7 +76,7 @@ pub fn stats_schema() -> Value {
 
 /// Get the cognitive state of a specific memory
 pub async fn execute_get(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args = args.ok_or("Missing arguments")?;
@@ -86,7 +85,6 @@ pub async fn execute_get(
         .as_str()
         .ok_or("memory_id is required")?;
 
-    let storage = storage.lock().await;
 
     // Get the memory
     let memory = storage.get_node(memory_id)
@@ -131,7 +129,7 @@ pub async fn execute_get(
 
 /// List memories by state
 pub async fn execute_list(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args = args.unwrap_or(serde_json::json!({}));
@@ -139,7 +137,6 @@ pub async fn execute_list(
     let state_filter = args["state"].as_str();
     let limit = args["limit"].as_i64().unwrap_or(20) as usize;
 
-    let storage = storage.lock().await;
 
     // Get all memories
     let memories = storage.get_all_nodes(500, 0)
@@ -210,9 +207,8 @@ pub async fn execute_list(
 
 /// Get memory state statistics
 pub async fn execute_stats(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
 ) -> Result<Value, String> {
-    let storage = storage.lock().await;
 
     let memories = storage.get_all_nodes(1000, 0)
         .map_err(|e| e.to_string())?;

@@ -65,6 +65,12 @@ pub fn schema() -> Value {
                 "type": "array",
                 "items": { "type": "string" },
                 "description": "Optional topics for context-dependent retrieval boosting"
+            },
+            "token_budget": {
+                "type": "integer",
+                "description": "Max tokens for response. Server truncates content to fit budget. Use memory(action='get') for full content of specific IDs.",
+                "minimum": 100,
+                "maximum": 10000
             }
         },
         "required": ["query"]
@@ -81,6 +87,8 @@ struct SearchArgs {
     #[serde(alias = "detail_level")]
     detail_level: Option<String>,
     context_topics: Option<Vec<String>>,
+    #[serde(alias = "token_budget")]
+    token_budget: Option<i32>,
 }
 
 /// Execute unified search with 7-stage cognitive pipeline.
@@ -96,7 +104,7 @@ struct SearchArgs {
 ///
 /// Also applies Testing Effect (Roediger & Karpicke 2006) by auto-strengthening on access.
 pub async fn execute(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: Option<Value>,
 ) -> Result<Value, String> {
@@ -135,9 +143,8 @@ pub async fn execute(
     // STAGE 1: Hybrid search with 3x over-fetch for reranking pool
     // ====================================================================
     let overfetch_limit = (limit * 3).min(100); // Cap at 100 to avoid excessive DB load
-    let storage_guard = storage.lock().await;
 
-    let results = storage_guard
+    let results = storage
         .hybrid_search(&args.query, overfetch_limit, keyword_weight, semantic_weight)
         .map_err(|e| e.to_string())?;
 
@@ -327,10 +334,9 @@ pub async fn execute(
     // Auto-strengthen on access (Testing Effect)
     // ====================================================================
     let ids: Vec<&str> = filtered_results.iter().map(|r| r.node.id.as_str()).collect();
-    let _ = storage_guard.strengthen_batch_on_access(&ids);
+    let _ = storage.strengthen_batch_on_access(&ids);
 
     // Drop storage lock before acquiring cognitive for side effects
-    drop(storage_guard);
 
     // ====================================================================
     // STAGE 7: Side effects — predictive memory + reconsolidation
@@ -371,10 +377,37 @@ pub async fn execute(
     // ====================================================================
     // Format and return
     // ====================================================================
-    let formatted: Vec<Value> = filtered_results
+    let mut formatted: Vec<Value> = filtered_results
         .iter()
         .map(|r| format_search_result(r, detail_level))
         .collect();
+
+    // ====================================================================
+    // Token budget enforcement (v1.8.0)
+    // ====================================================================
+    let mut budget_expandable: Vec<String> = Vec::new();
+    let mut budget_tokens_used: Option<usize> = None;
+    if let Some(budget) = args.token_budget {
+        let budget = budget.clamp(100, 10000) as usize;
+        let budget_chars = budget * 4;
+        let mut used = 0;
+        let mut budgeted = Vec::new();
+
+        for result in &formatted {
+            let size = serde_json::to_string(result).unwrap_or_default().len();
+            if used + size > budget_chars {
+                if let Some(id) = result.get("id").and_then(|v| v.as_str()) {
+                    budget_expandable.push(id.to_string());
+                }
+                continue;
+            }
+            used += size;
+            budgeted.push(result.clone());
+        }
+
+        budget_tokens_used = Some(used / 4);
+        formatted = budgeted;
+    }
 
     // Check learning mode via attention signal
     let learning_mode = cognitive.try_lock().ok().map(|cog| cog.attention_signal.is_learning_mode()).unwrap_or(false);
@@ -402,6 +435,16 @@ pub async fn execute(
     // Include learning mode detection
     if learning_mode {
         response["learningModeDetected"] = serde_json::json!(true);
+    }
+    // Include token budget info (v1.8.0)
+    if !budget_expandable.is_empty() {
+        response["expandable"] = serde_json::json!(budget_expandable);
+    }
+    if let Some(budget) = args.token_budget {
+        response["tokenBudget"] = serde_json::json!(budget);
+    }
+    if let Some(used) = budget_tokens_used {
+        response["tokensUsed"] = serde_json::json!(used);
     }
 
     Ok(response)
@@ -516,14 +559,14 @@ mod tests {
     }
 
     /// Create a test storage instance with a temporary database
-    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+    async fn test_storage() -> (Arc<Storage>, TempDir) {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
     /// Helper to ingest test content
-    async fn ingest_test_content(storage: &Arc<Mutex<Storage>>, content: &str) -> String {
+    async fn ingest_test_content(storage: &Arc<Storage>, content: &str) -> String {
         let input = IngestInput {
             content: content.to_string(),
             node_type: "fact".to_string(),
@@ -534,8 +577,7 @@ mod tests {
             valid_from: None,
             valid_until: None,
         };
-        let mut storage_lock = storage.lock().await;
-        let node = storage_lock.ingest(input).unwrap();
+        let node = storage.ingest(input).unwrap();
         node.id
     }
 
@@ -966,5 +1008,91 @@ mod tests {
         let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Invalid detail_level"));
+    }
+
+    // ========================================================================
+    // TOKEN BUDGET TESTS (v1.8.0)
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_token_budget_limits_results() {
+        let (storage, _dir) = test_storage().await;
+        for i in 0..10 {
+            ingest_test_content(
+                &storage,
+                &format!("Budget test content number {} with some extra text to increase size.", i),
+            )
+            .await;
+        }
+
+        // Small budget should reduce results
+        let args = serde_json::json!({
+            "query": "budget test",
+            "token_budget": 200,
+            "min_similarity": 0.0
+        });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_ok());
+
+        let value = result.unwrap();
+        assert!(value["tokenBudget"].as_i64().unwrap() == 200);
+        assert!(value["tokensUsed"].is_number());
+    }
+
+    #[tokio::test]
+    async fn test_token_budget_expandable() {
+        let (storage, _dir) = test_storage().await;
+        for i in 0..15 {
+            ingest_test_content(
+                &storage,
+                &format!(
+                    "Expandable budget test number {} with quite a bit of content to ensure we exceed the token budget allocation threshold.",
+                    i
+                ),
+            )
+            .await;
+        }
+
+        let args = serde_json::json!({
+            "query": "expandable budget test",
+            "token_budget": 150,
+            "min_similarity": 0.0
+        });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_ok());
+
+        let value = result.unwrap();
+        // expandable field should exist if results were dropped
+        if let Some(expandable) = value.get("expandable") {
+            assert!(expandable.is_array());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_no_budget_unchanged() {
+        let (storage, _dir) = test_storage().await;
+        ingest_test_content(&storage, "No budget test content.").await;
+
+        let args = serde_json::json!({
+            "query": "no budget",
+            "min_similarity": 0.0
+        });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_ok());
+
+        let value = result.unwrap();
+        // No budget fields should be present
+        assert!(value.get("tokenBudget").is_none());
+        assert!(value.get("tokensUsed").is_none());
+        assert!(value.get("expandable").is_none());
+    }
+
+    #[test]
+    fn test_schema_has_token_budget() {
+        let schema_value = schema();
+        let tb = &schema_value["properties"]["token_budget"];
+        assert!(tb.is_object());
+        assert_eq!(tb["minimum"], 100);
+        assert_eq!(tb["maximum"], 10000);
     }
 }

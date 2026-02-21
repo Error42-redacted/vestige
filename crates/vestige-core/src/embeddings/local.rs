@@ -201,7 +201,7 @@ impl Embedding {
 
 /// Service for generating and managing embeddings
 pub struct EmbeddingService {
-    model_loaded: bool,
+    _unused: (),
 }
 
 impl Default for EmbeddingService {
@@ -214,7 +214,7 @@ impl EmbeddingService {
     /// Create a new embedding service
     pub fn new() -> Self {
         Self {
-            model_loaded: false,
+            _unused: (),
         }
     }
 
@@ -235,9 +235,8 @@ impl EmbeddingService {
     }
 
     /// Initialize the model (downloads if necessary)
-    pub fn init(&mut self) -> Result<(), EmbeddingError> {
+    pub fn init(&self) -> Result<(), EmbeddingError> {
         let _model = get_model()?; // Ensures model is loaded and returns any init errors
-        self.model_loaded = true;
         Ok(())
     }
 

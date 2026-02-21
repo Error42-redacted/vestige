@@ -394,7 +394,7 @@ fn run_consolidate() -> anyhow::Result<()> {
     println!("Running memory consolidation cycle...");
     println!();
 
-    let mut storage = Storage::new(None)?;
+    let storage = Storage::new(None)?;
     let result = storage.run_consolidation()?;
 
     println!("{}: {}", "Nodes Processed".white().bold(), result.nodes_processed);
@@ -456,7 +456,7 @@ fn run_restore(backup_path: PathBuf) -> anyhow::Result<()> {
 
     // Initialize storage
     println!("Initializing storage...");
-    let mut storage = Storage::new(None)?;
+    let storage = Storage::new(None)?;
 
     println!("Generating embeddings and ingesting memories...");
     println!();
@@ -728,7 +728,7 @@ fn run_gc(
     println!("{}", "=== Vestige Garbage Collection ===".cyan().bold());
     println!();
 
-    let mut storage = Storage::new(None)?;
+    let storage = Storage::new(None)?;
     let all_nodes = fetch_all_nodes(&storage)?;
     let now = Utc::now();
 
@@ -892,7 +892,7 @@ fn run_ingest(
         valid_until: None,
     };
 
-    let mut storage = Storage::new(None)?;
+    let storage = Storage::new(None)?;
 
     // Try smart_ingest (PE Gating) if available, otherwise regular ingest
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
@@ -943,7 +943,7 @@ fn run_dashboard(port: u16, open_browser: bool) -> anyhow::Result<()> {
     println!();
     println!("Starting dashboard at {}...", format!("http://127.0.0.1:{}", port).cyan());
 
-    let mut storage = Storage::new(None)?;
+    let storage = Storage::new(None)?;
 
     // Try to initialize embeddings for search support
     #[cfg(feature = "embeddings")]
@@ -957,7 +957,7 @@ fn run_dashboard(port: u16, open_browser: bool) -> anyhow::Result<()> {
         }
     }
 
-    let storage = std::sync::Arc::new(tokio::sync::Mutex::new(storage));
+    let storage = std::sync::Arc::new(storage);
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {

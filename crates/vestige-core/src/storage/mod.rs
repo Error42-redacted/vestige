@@ -11,6 +11,6 @@ mod sqlite;
 
 pub use migrations::MIGRATIONS;
 pub use sqlite::{
-    ConsolidationHistoryRecord, DreamHistoryRecord, InsightRecord, IntentionRecord, Result,
-    SmartIngestResult, StateTransitionRecord, Storage, StorageError,
+    ConnectionRecord, ConsolidationHistoryRecord, DreamHistoryRecord, InsightRecord,
+    IntentionRecord, Result, SmartIngestResult, StateTransitionRecord, Storage, StorageError,
 };

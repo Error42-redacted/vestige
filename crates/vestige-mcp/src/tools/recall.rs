@@ -5,7 +5,6 @@
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use vestige_core::{RecallInput, SearchMode, Storage};
 
@@ -46,7 +45,7 @@ struct RecallArgs {
 }
 
 pub async fn execute(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: RecallArgs = match args {
@@ -66,7 +65,6 @@ pub async fn execute(
         valid_at: None,
     };
 
-    let storage = storage.lock().await;
     let nodes = storage.recall(input).map_err(|e| e.to_string())?;
 
     let results: Vec<Value> = nodes
@@ -107,14 +105,14 @@ mod tests {
     use tempfile::TempDir;
 
     /// Create a test storage instance with a temporary database
-    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+    async fn test_storage() -> (Arc<Storage>, TempDir) {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
     /// Helper to ingest test content
-    async fn ingest_test_content(storage: &Arc<Mutex<Storage>>, content: &str) -> String {
+    async fn ingest_test_content(storage: &Arc<Storage>, content: &str) -> String {
         let input = IngestInput {
             content: content.to_string(),
             node_type: "fact".to_string(),
@@ -125,8 +123,7 @@ mod tests {
             valid_from: None,
             valid_until: None,
         };
-        let mut storage_lock = storage.lock().await;
-        let node = storage_lock.ingest(input).unwrap();
+        let node = storage.ingest(input).unwrap();
         node.id
     }
 

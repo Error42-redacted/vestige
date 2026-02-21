@@ -43,6 +43,8 @@ pub use dreams::{
     ConsolidationReport,
     // Sleep Consolidation types
     ConsolidationScheduler,
+    DiscoveredConnection,
+    DiscoveredConnectionType,
     DreamConfig,
     // DreamMemory - input type for dreaming
     DreamMemory,

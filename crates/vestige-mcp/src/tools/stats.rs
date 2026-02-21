@@ -4,7 +4,6 @@
 
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use vestige_core::{MemoryStats, Storage};
 
@@ -24,8 +23,7 @@ pub fn health_schema() -> Value {
     })
 }
 
-pub async fn execute_stats(storage: &Arc<Mutex<Storage>>) -> Result<Value, String> {
-    let storage = storage.lock().await;
+pub async fn execute_stats(storage: &Arc<Storage>) -> Result<Value, String> {
     let stats = storage.get_stats().map_err(|e| e.to_string())?;
 
     Ok(serde_json::json!({
@@ -42,8 +40,7 @@ pub async fn execute_stats(storage: &Arc<Mutex<Storage>>) -> Result<Value, Strin
     }))
 }
 
-pub async fn execute_health(storage: &Arc<Mutex<Storage>>) -> Result<Value, String> {
-    let storage = storage.lock().await;
+pub async fn execute_health(storage: &Arc<Storage>) -> Result<Value, String> {
     let stats = storage.get_stats().map_err(|e| e.to_string())?;
 
     // Determine health status

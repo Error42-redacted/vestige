@@ -22,7 +22,7 @@ use vestige_core::Storage;
 
 /// MCP Server implementation
 pub struct McpServer {
-    storage: Arc<Mutex<Storage>>,
+    storage: Arc<Storage>,
     cognitive: Arc<Mutex<CognitiveEngine>>,
     initialized: bool,
     /// Tool call counter for inline consolidation trigger (every 100 calls)
@@ -30,7 +30,7 @@ pub struct McpServer {
 }
 
 impl McpServer {
-    pub fn new(storage: Arc<Mutex<Storage>>, cognitive: Arc<Mutex<CognitiveEngine>>) -> Self {
+    pub fn new(storage: Arc<Storage>, cognitive: Arc<Mutex<CognitiveEngine>>) -> Self {
         Self {
             storage,
             cognitive,
@@ -131,7 +131,7 @@ impl McpServer {
 
     /// Handle tools/list request
     async fn handle_tools_list(&self) -> Result<serde_json::Value, JsonRpcError> {
-        // v1.7: 18 tools. Deprecated tools still work via redirects in handle_tools_call.
+        // v1.8: 19 tools. Deprecated tools still work via redirects in handle_tools_call.
         let tools = vec![
             // ================================================================
             // UNIFIED TOOLS (v1.1+)
@@ -243,6 +243,27 @@ impl McpServer {
                 name: "restore".to_string(),
                 description: Some("Restore memories from a JSON backup file. Supports MCP wrapper format, RecallResult format, and direct memory array format.".to_string()),
                 input_schema: tools::restore::schema(),
+            },
+            // ================================================================
+            // CONTEXT PACKETS (v1.8+)
+            // ================================================================
+            ToolDescription {
+                name: "session_context".to_string(),
+                description: Some("One-call session initialization. Combines search, intentions, status, predictions, and codebase context into a single token-budgeted response. Replaces 5 separate calls at session start.".to_string()),
+                input_schema: tools::session_context::schema(),
+            },
+            // ================================================================
+            // AUTONOMIC TOOLS (v1.9+)
+            // ================================================================
+            ToolDescription {
+                name: "memory_health".to_string(),
+                description: Some("Retention dashboard. Returns avg retention, retention distribution (buckets: 0-20%, 20-40%, etc.), trend (improving/declining/stable), and recommendation. Lightweight alternative to full system_status focused on memory quality.".to_string()),
+                input_schema: tools::health::schema(),
+            },
+            ToolDescription {
+                name: "memory_graph".to_string(),
+                description: Some("Subgraph export for visualization. Input: center_id or query, depth (1-3), max_nodes. Returns nodes with force-directed layout positions and edges with weights. Powers memory graph visualization.".to_string()),
+                input_schema: tools::graph::schema(),
             },
         ];
 
@@ -571,6 +592,17 @@ impl McpServer {
             "predict" => tools::predict::execute(&self.storage, &self.cognitive, request.arguments).await,
             "restore" => tools::restore::execute(&self.storage, request.arguments).await,
 
+            // ================================================================
+            // CONTEXT PACKETS (v1.8+)
+            // ================================================================
+            "session_context" => tools::session_context::execute(&self.storage, &self.cognitive, request.arguments).await,
+
+            // ================================================================
+            // AUTONOMIC TOOLS (v1.9+)
+            // ================================================================
+            "memory_health" => tools::health::execute(&self.storage, request.arguments).await,
+            "memory_graph" => tools::graph::execute(&self.storage, request.arguments).await,
+
             name => {
                 return Err(JsonRpcError::method_not_found_with_message(&format!(
                     "Unknown tool: {}",
@@ -618,21 +650,19 @@ impl McpServer {
                     let _expired = cog.reconsolidation.reconsolidate_expired();
                 }
 
-                if let Ok(mut storage) = storage_clone.try_lock() {
-                    match storage.run_consolidation() {
-                        Ok(result) => {
-                            tracing::info!(
-                                tool_calls = count,
-                                decay_applied = result.decay_applied,
-                                duplicates_merged = result.duplicates_merged,
-                                activations_computed = result.activations_computed,
-                                duration_ms = result.duration_ms,
-                                "Inline consolidation triggered (scheduler)"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!("Inline consolidation failed: {}", e);
-                        }
+                match storage_clone.run_consolidation() {
+                    Ok(result) => {
+                        tracing::info!(
+                            tool_calls = count,
+                            decay_applied = result.decay_applied,
+                            duplicates_merged = result.duplicates_merged,
+                            activations_computed = result.activations_computed,
+                            duration_ms = result.duration_ms,
+                            "Inline consolidation triggered (scheduler)"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Inline consolidation failed: {}", e);
                     }
                 }
             });
@@ -766,10 +796,10 @@ mod tests {
     use tempfile::TempDir;
 
     /// Create a test storage instance with a temporary database
-    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+    async fn test_storage() -> (Arc<Storage>, TempDir) {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
     /// Create a test server with temporary storage
@@ -913,8 +943,8 @@ mod tests {
         let result = response.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
 
-        // v1.7: 18 tools (4 unified + 1 core + 2 temporal + 5 maintenance + 2 auto-save + 3 cognitive + 1 restore)
-        assert_eq!(tools.len(), 18, "Expected exactly 18 tools in v1.7+");
+        // v1.9: 21 tools (4 unified + 1 core + 2 temporal + 5 maintenance + 2 auto-save + 3 cognitive + 1 restore + 1 session_context + 2 autonomic)
+        assert_eq!(tools.len(), 21, "Expected exactly 21 tools in v1.9+");
 
         let tool_names: Vec<&str> = tools
             .iter()
@@ -958,6 +988,13 @@ mod tests {
         assert!(tool_names.contains(&"explore_connections"));
         assert!(tool_names.contains(&"predict"));
         assert!(tool_names.contains(&"restore"));
+
+        // Context packets (v1.8)
+        assert!(tool_names.contains(&"session_context"));
+
+        // Autonomic tools (v1.9)
+        assert!(tool_names.contains(&"memory_health"));
+        assert!(tool_names.contains(&"memory_graph"));
     }
 
     #[tokio::test]

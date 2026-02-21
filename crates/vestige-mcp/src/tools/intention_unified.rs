@@ -199,7 +199,7 @@ struct UnifiedIntentionArgs {
 
 /// Execute the unified intention tool
 pub async fn execute(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: Option<Value>,
 ) -> Result<Value, String> {
@@ -226,7 +226,7 @@ pub async fn execute(
 
 /// Execute "set" action - create a new intention
 async fn execute_set(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: &UnifiedIntentionArgs,
 ) -> Result<Value, String> {
@@ -382,7 +382,6 @@ async fn execute_set(
         source_data: None,
     };
 
-    let mut storage = storage.lock().await;
     storage.save_intention(&record).map_err(|e| e.to_string())?;
 
     Ok(serde_json::json!({
@@ -399,7 +398,7 @@ async fn execute_set(
 
 /// Execute "check" action - find triggered intentions
 async fn execute_check(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: &UnifiedIntentionArgs,
 ) -> Result<Value, String> {
@@ -425,7 +424,6 @@ async fn execute_check(
         let _ = cog.prospective_memory.update_context(prospective_ctx);
     }
 
-    let storage = storage.lock().await;
 
     // Get active intentions
     let intentions = storage.get_active_intentions().map_err(|e| e.to_string())?;
@@ -518,7 +516,7 @@ async fn execute_check(
 
 /// Execute "update" action - complete, snooze, or cancel an intention
 async fn execute_update(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: &UnifiedIntentionArgs,
 ) -> Result<Value, String> {
     let intention_id = args
@@ -533,7 +531,6 @@ async fn execute_update(
 
     match status.as_str() {
         "complete" => {
-            let mut storage = storage.lock().await;
             let updated = storage
                 .update_intention_status(intention_id, "fulfilled")
                 .map_err(|e| e.to_string())?;
@@ -554,7 +551,6 @@ async fn execute_update(
             let minutes = args.snooze_minutes.unwrap_or(30);
             let snooze_until = Utc::now() + Duration::minutes(minutes);
 
-            let mut storage = storage.lock().await;
             let updated = storage
                 .snooze_intention(intention_id, snooze_until)
                 .map_err(|e| e.to_string())?;
@@ -573,7 +569,6 @@ async fn execute_update(
             }
         }
         "cancel" => {
-            let mut storage = storage.lock().await;
             let updated = storage
                 .update_intention_status(intention_id, "cancelled")
                 .map_err(|e| e.to_string())?;
@@ -599,11 +594,10 @@ async fn execute_update(
 
 /// Execute "list" action - list intentions with optional filtering
 async fn execute_list(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: &UnifiedIntentionArgs,
 ) -> Result<Value, String> {
     let filter_status = args.filter_status.as_deref().unwrap_or("active");
-    let storage = storage.lock().await;
 
     let intentions = if filter_status == "all" {
         // Get all by combining different statuses
@@ -682,14 +676,14 @@ mod tests {
     }
 
     /// Create a test storage instance with a temporary database
-    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+    async fn test_storage() -> (Arc<Storage>, TempDir) {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
     /// Helper to create an intention and return its ID
-    async fn create_test_intention(storage: &Arc<Mutex<Storage>>, description: &str) -> String {
+    async fn create_test_intention(storage: &Arc<Storage>, description: &str) -> String {
         let args = serde_json::json!({
             "action": "set",
             "description": description

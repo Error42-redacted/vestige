@@ -138,8 +138,8 @@ pub use fsrs::{
 
 // Storage layer
 pub use storage::{
-    ConsolidationHistoryRecord, DreamHistoryRecord, InsightRecord, IntentionRecord, Result,
-    SmartIngestResult, StateTransitionRecord, Storage, StorageError,
+    ConnectionRecord, ConsolidationHistoryRecord, DreamHistoryRecord, InsightRecord,
+    IntentionRecord, Result, SmartIngestResult, StateTransitionRecord, Storage, StorageError,
 };
 
 // Consolidation (sleep-inspired memory processing)
@@ -175,6 +175,8 @@ pub use advanced::{
     DreamConfig,
     // DreamMemory - input type for dreaming
     DreamMemory,
+    DiscoveredConnection,
+    DiscoveredConnectionType,
     DreamResult,
     EmbeddingStrategy,
     ImportanceDecayConfig,

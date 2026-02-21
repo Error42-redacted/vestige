@@ -5,7 +5,6 @@
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use vestige_core::Storage;
 
@@ -90,7 +89,7 @@ struct HybridSearchArgs {
 }
 
 pub async fn execute_semantic(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: SemanticSearchArgs = match args {
@@ -102,7 +101,6 @@ pub async fn execute_semantic(
         return Err("Query cannot be empty".to_string());
     }
 
-    let storage = storage.lock().await;
 
     // Check if embeddings are ready
     if !storage.is_embedding_ready() {
@@ -143,7 +141,7 @@ pub async fn execute_semantic(
 }
 
 pub async fn execute_hybrid(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: HybridSearchArgs = match args {
@@ -155,7 +153,6 @@ pub async fn execute_hybrid(
         return Err("Query cannot be empty".to_string());
     }
 
-    let storage = storage.lock().await;
 
     let results = storage
         .hybrid_search(

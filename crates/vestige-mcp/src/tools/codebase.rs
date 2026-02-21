@@ -6,7 +6,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
 
 use vestige_core::{IngestInput, Storage};
 
@@ -115,7 +115,7 @@ struct ContextArgs {
 }
 
 pub async fn execute_pattern(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: PatternArgs = match args {
@@ -156,7 +156,6 @@ pub async fn execute_pattern(
         valid_until: None,
     };
 
-    let mut storage = storage.lock().await;
     let node = storage.ingest(input).map_err(|e| e.to_string())?;
 
     Ok(serde_json::json!({
@@ -168,7 +167,7 @@ pub async fn execute_pattern(
 }
 
 pub async fn execute_decision(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: DecisionArgs = match args {
@@ -223,7 +222,6 @@ pub async fn execute_decision(
         valid_until: None,
     };
 
-    let mut storage = storage.lock().await;
     let node = storage.ingest(input).map_err(|e| e.to_string())?;
 
     Ok(serde_json::json!({
@@ -234,7 +232,7 @@ pub async fn execute_decision(
 }
 
 pub async fn execute_context(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: ContextArgs = args
@@ -247,7 +245,6 @@ pub async fn execute_context(
         });
 
     let limit = args.limit.unwrap_or(10).clamp(1, 50);
-    let storage = storage.lock().await;
 
     // Build tag filter for codebase
     // Tags are stored as: ["pattern", "codebase", "codebase:vestige"]

@@ -35,7 +35,7 @@ pub fn schema() -> serde_json::Value {
 }
 
 pub async fn execute(
-    _storage: &Arc<Mutex<Storage>>,
+    _storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
@@ -137,10 +137,10 @@ mod tests {
         Arc::new(Mutex::new(CognitiveEngine::new()))
     }
 
-    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+    async fn test_storage() -> (Arc<Storage>, TempDir) {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
     #[test]

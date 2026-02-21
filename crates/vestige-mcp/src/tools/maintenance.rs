@@ -118,12 +118,11 @@ pub fn system_status_schema() -> Value {
 /// Returns system health status, full statistics, FSRS preview,
 /// cognitive module health, state distribution, and actionable recommendations.
 pub async fn execute_system_status(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     _args: Option<Value>,
 ) -> Result<Value, String> {
-    let storage_guard = storage.lock().await;
-    let stats = storage_guard.get_stats().map_err(|e| e.to_string())?;
+    let stats = storage.get_stats().map_err(|e| e.to_string())?;
 
     // === Health assessment ===
     let status = if stats.total_nodes == 0 {
@@ -142,7 +141,7 @@ pub async fn execute_system_status(
         0.0
     };
 
-    let embedding_ready = storage_guard.is_embedding_ready();
+    let embedding_ready = storage.is_embedding_ready();
 
     let mut warnings = Vec::new();
     if stats.average_retention < 0.5 && stats.total_nodes > 0 {
@@ -176,7 +175,7 @@ pub async fn execute_system_status(
     }
 
     // === State distribution ===
-    let nodes = storage_guard.get_all_nodes(500, 0).map_err(|e| e.to_string())?;
+    let nodes = storage.get_all_nodes(500, 0).map_err(|e| e.to_string())?;
     let total = nodes.len();
     let (active, dormant, silent, unavailable) = if total > 0 {
         let mut a = 0usize;
@@ -246,15 +245,14 @@ pub async fn execute_system_status(
     };
 
     // === Automation triggers (for conditional dream/backup/gc at session start) ===
-    let last_consolidation = storage_guard.get_last_consolidation().ok().flatten();
-    let last_dream = storage_guard.get_last_dream().ok().flatten();
+    let last_consolidation = storage.get_last_consolidation().ok().flatten();
+    let last_dream = storage.get_last_dream().ok().flatten();
     let saves_since_last_dream = match &last_dream {
-        Some(dt) => storage_guard.count_memories_since(*dt).unwrap_or(0),
+        Some(dt) => storage.count_memories_since(*dt).unwrap_or(0),
         None => stats.total_nodes as i64,
     };
     let last_backup = Storage::get_last_backup_timestamp();
 
-    drop(storage_guard);
 
     Ok(serde_json::json!({
         "tool": "system_status",
@@ -299,10 +297,9 @@ pub async fn execute_system_status(
 /// Health check tool — deprecated in v1.7, use execute_system_status() instead
 #[allow(dead_code)]
 pub async fn execute_health_check(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     _args: Option<Value>,
 ) -> Result<Value, String> {
-    let storage = storage.lock().await;
     let stats = storage.get_stats().map_err(|e| e.to_string())?;
 
     let status = if stats.total_nodes == 0 {
@@ -369,10 +366,9 @@ pub async fn execute_health_check(
 
 /// Consolidate tool
 pub async fn execute_consolidate(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     _args: Option<Value>,
 ) -> Result<Value, String> {
-    let mut storage = storage.lock().await;
     let result = storage.run_consolidation().map_err(|e| e.to_string())?;
 
     Ok(serde_json::json!({
@@ -392,15 +388,14 @@ pub async fn execute_consolidate(
 /// Stats tool — deprecated in v1.7, use execute_system_status() instead
 #[allow(dead_code)]
 pub async fn execute_stats(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     _args: Option<Value>,
 ) -> Result<Value, String> {
-    let storage_guard = storage.lock().await;
-    let stats = storage_guard.get_stats().map_err(|e| e.to_string())?;
+    let stats = storage.get_stats().map_err(|e| e.to_string())?;
 
     // Compute state distribution from a sample of nodes
-    let nodes = storage_guard.get_all_nodes(500, 0).map_err(|e| e.to_string())?;
+    let nodes = storage.get_all_nodes(500, 0).map_err(|e| e.to_string())?;
     let total = nodes.len();
     let (active, dormant, silent, unavailable) = if total > 0 {
         let mut a = 0usize;
@@ -543,7 +538,6 @@ pub async fn execute_stats(
     } else {
         None
     };
-    drop(storage_guard);
 
     Ok(serde_json::json!({
         "tool": "stats",
@@ -573,7 +567,7 @@ pub async fn execute_stats(
 
 /// Backup tool
 pub async fn execute_backup(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     _args: Option<Value>,
 ) -> Result<Value, String> {
     // Determine backup path
@@ -591,7 +585,6 @@ pub async fn execute_backup(
 
     // Use VACUUM INTO for a consistent backup (handles WAL properly)
     {
-        let storage = storage.lock().await;
         storage.backup_to(&backup_path)
             .map_err(|e| format!("Failed to create backup: {}", e))?;
     }
@@ -619,7 +612,7 @@ struct ExportArgs {
 
 /// Export tool
 pub async fn execute_export(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: ExportArgs = match args {
@@ -650,7 +643,6 @@ pub async fn execute_export(
     let tag_filter: Vec<String> = args.tags.unwrap_or_default();
 
     // Fetch all nodes (capped at 100K to prevent OOM)
-    let storage = storage.lock().await;
     let mut all_nodes = Vec::new();
     let page_size = 500;
     let max_nodes = 100_000;
@@ -755,7 +747,7 @@ struct GcArgs {
 
 /// Garbage collection tool
 pub async fn execute_gc(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: GcArgs = match args {
@@ -771,7 +763,6 @@ pub async fn execute_gc(
     let max_age_days = args.max_age_days;
     let dry_run = args.dry_run.unwrap_or(true); // Default to dry_run for safety
 
-    let mut storage = storage.lock().await;
     let now = Utc::now();
 
     // Fetch all nodes (capped at 100K to prevent OOM)
@@ -883,10 +874,10 @@ mod tests {
         Arc::new(Mutex::new(CognitiveEngine::new()))
     }
 
-    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+    async fn test_storage() -> (Arc<Storage>, TempDir) {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
     #[test]
@@ -912,8 +903,7 @@ mod tests {
     async fn test_system_status_with_memories() {
         let (storage, _dir) = test_storage().await;
         {
-            let mut s = storage.lock().await;
-            s.ingest(vestige_core::IngestInput {
+            storage.ingest(vestige_core::IngestInput {
                 content: "Test memory for status".to_string(),
                 node_type: "fact".to_string(),
                 source: None,
@@ -961,9 +951,8 @@ mod tests {
     async fn test_system_status_automation_triggers_with_memories() {
         let (storage, _dir) = test_storage().await;
         {
-            let mut s = storage.lock().await;
             for i in 0..3 {
-                s.ingest(vestige_core::IngestInput {
+                storage.ingest(vestige_core::IngestInput {
                     content: format!("Automation trigger test memory {}", i),
                     node_type: "fact".to_string(),
                     source: None,

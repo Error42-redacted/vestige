@@ -55,7 +55,7 @@ struct IngestArgs {
 }
 
 pub async fn execute(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: Option<Value>,
 ) -> Result<Value, String> {
@@ -123,20 +123,18 @@ pub async fn execute(
     // ====================================================================
     // INGEST (storage lock)
     // ====================================================================
-    let mut storage_guard = storage.lock().await;
 
     // Route through smart_ingest when embeddings are available to prevent duplicates.
     // Falls back to raw ingest only when embeddings aren't ready.
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
     {
         let fallback_input = input.clone();
-        match storage_guard.smart_ingest(input) {
+        match storage.smart_ingest(input) {
             Ok(result) => {
                 let node_id = result.node.id.clone();
                 let node_content = result.node.content.clone();
                 let node_type = result.node.node_type.clone();
                 let has_embedding = result.node.has_embedding.unwrap_or(false);
-                drop(storage_guard);
 
                 run_post_ingest(cognitive, &node_id, &node_content, &node_type, importance_composite);
 
@@ -153,12 +151,11 @@ pub async fn execute(
                 }))
             }
             Err(_) => {
-                let node = storage_guard.ingest(fallback_input).map_err(|e| e.to_string())?;
+                let node = storage.ingest(fallback_input).map_err(|e| e.to_string())?;
                 let node_id = node.id.clone();
                 let node_content = node.content.clone();
                 let node_type = node.node_type.clone();
                 let has_embedding = node.has_embedding.unwrap_or(false);
-                drop(storage_guard);
 
                 run_post_ingest(cognitive, &node_id, &node_content, &node_type, importance_composite);
 
@@ -178,12 +175,11 @@ pub async fn execute(
     // Fallback for builds without embedding features
     #[cfg(not(all(feature = "embeddings", feature = "vector-search")))]
     {
-        let node = storage_guard.ingest(input).map_err(|e| e.to_string())?;
+        let node = storage.ingest(input).map_err(|e| e.to_string())?;
         let node_id = node.id.clone();
         let node_content = node.content.clone();
         let node_type = node.node_type.clone();
         let has_embedding = node.has_embedding.unwrap_or(false);
-        drop(storage_guard);
 
         run_post_ingest(cognitive, &node_id, &node_content, &node_type, importance_composite);
 
@@ -249,10 +245,10 @@ mod tests {
     }
 
     /// Create a test storage instance with a temporary database
-    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+    async fn test_storage() -> (Arc<Storage>, TempDir) {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
     // ========================================================================
@@ -412,8 +408,7 @@ mod tests {
 
         // Verify node was created - the default type is "fact"
         let node_id = result.unwrap()["nodeId"].as_str().unwrap().to_string();
-        let storage_lock = storage.lock().await;
-        let node = storage_lock.get_node(&node_id).unwrap().unwrap();
+        let node = storage.get_node(&node_id).unwrap().unwrap();
         assert_eq!(node.node_type, "fact");
     }
 

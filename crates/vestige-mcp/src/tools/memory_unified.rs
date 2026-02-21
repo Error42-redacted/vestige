@@ -69,7 +69,7 @@ struct MemoryArgs {
 
 /// Execute the unified memory tool
 pub async fn execute(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: Option<Value>,
 ) -> Result<Value, String> {
@@ -95,8 +95,7 @@ pub async fn execute(
 }
 
 /// Get full memory node with all metadata
-async fn execute_get(storage: &Arc<Mutex<Storage>>, id: &str) -> Result<Value, String> {
-    let storage = storage.lock().await;
+async fn execute_get(storage: &Arc<Storage>, id: &str) -> Result<Value, String> {
     let node = storage.get_node(id).map_err(|e| e.to_string())?;
 
     match node {
@@ -136,8 +135,7 @@ async fn execute_get(storage: &Arc<Mutex<Storage>>, id: &str) -> Result<Value, S
 }
 
 /// Delete a memory and return success status
-async fn execute_delete(storage: &Arc<Mutex<Storage>>, id: &str) -> Result<Value, String> {
-    let mut storage = storage.lock().await;
+async fn execute_delete(storage: &Arc<Storage>, id: &str) -> Result<Value, String> {
     let deleted = storage.delete_node(id).map_err(|e| e.to_string())?;
 
     Ok(serde_json::json!({
@@ -149,8 +147,7 @@ async fn execute_delete(storage: &Arc<Mutex<Storage>>, id: &str) -> Result<Value
 }
 
 /// Get accessibility state of a memory (Active/Dormant/Silent/Unavailable)
-async fn execute_state(storage: &Arc<Mutex<Storage>>, id: &str) -> Result<Value, String> {
-    let storage = storage.lock().await;
+async fn execute_state(storage: &Arc<Storage>, id: &str) -> Result<Value, String> {
 
     // Get the memory
     let memory = storage
@@ -197,18 +194,16 @@ async fn execute_state(storage: &Arc<Mutex<Storage>>, id: &str) -> Result<Value,
 
 /// Promote a memory (thumbs up) — increases retrieval strength with cognitive feedback pipeline
 async fn execute_promote(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     id: &str,
     reason: Option<String>,
 ) -> Result<Value, String> {
-    let storage_guard = storage.lock().await;
 
-    let before = storage_guard.get_node(id).map_err(|e| e.to_string())?
+    let before = storage.get_node(id).map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Node not found: {}", id))?;
 
-    let node = storage_guard.promote_memory(id).map_err(|e| e.to_string())?;
-    drop(storage_guard);
+    let node = storage.promote_memory(id).map_err(|e| e.to_string())?;
 
     // Cognitive feedback pipeline
     if let Ok(mut cog) = cognitive.try_lock() {
@@ -254,18 +249,16 @@ async fn execute_promote(
 
 /// Demote a memory (thumbs down) — decreases retrieval strength with cognitive feedback pipeline
 async fn execute_demote(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     id: &str,
     reason: Option<String>,
 ) -> Result<Value, String> {
-    let storage_guard = storage.lock().await;
 
-    let before = storage_guard.get_node(id).map_err(|e| e.to_string())?
+    let before = storage.get_node(id).map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Node not found: {}", id))?;
 
-    let node = storage_guard.demote_memory(id).map_err(|e| e.to_string())?;
-    drop(storage_guard);
+    let node = storage.demote_memory(id).map_err(|e| e.to_string())?;
 
     // Cognitive feedback pipeline
     if let Ok(mut cog) = cognitive.try_lock() {
@@ -356,15 +349,14 @@ mod tests {
         Arc::new(Mutex::new(CognitiveEngine::new()))
     }
 
-    async fn test_storage() -> (Arc<Mutex<Storage>>, tempfile::TempDir) {
+    async fn test_storage() -> (Arc<Storage>, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
-    async fn ingest_memory(storage: &Arc<Mutex<Storage>>) -> String {
-        let mut s = storage.lock().await;
-        let node = s
+    async fn ingest_memory(storage: &Arc<Storage>) -> String {
+        let node = storage
             .ingest(vestige_core::IngestInput {
                 content: "Memory unified test content".to_string(),
                 node_type: "fact".to_string(),

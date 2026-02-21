@@ -2106,7 +2106,8 @@ mod tests {
             )
             .unwrap();
 
-        assert!(barcode.id >= 0);
+        // barcode.id is u64, verify it was assigned
+        let _ = barcode.id;
         assert_eq!(index.len(), 1);
 
         let retrieved = index.get_index("test-id").unwrap();

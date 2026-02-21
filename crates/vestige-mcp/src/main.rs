@@ -134,7 +134,7 @@ async fn main() {
 
     // Initialize storage with optional custom data directory
     let storage = match Storage::new(data_dir) {
-        Ok(mut s) => {
+        Ok(s) => {
             info!("Storage initialized successfully");
 
             // Try to initialize embeddings early and log any issues
@@ -149,7 +149,7 @@ async fn main() {
                 }
             }
 
-            Arc::new(Mutex::new(s))
+            Arc::new(s)
         }
         Err(e) => {
             error!("Failed to initialize storage: {}", e);
@@ -173,35 +173,31 @@ async fn main() {
 
             loop {
                 // Check whether consolidation is actually needed
-                let should_run = {
-                    let storage = storage_clone.lock().await;
-                    match storage.get_last_consolidation() {
-                        Ok(Some(last)) => {
-                            let elapsed = chrono::Utc::now() - last;
-                            let stale = elapsed > chrono::Duration::hours(interval_hours as i64);
-                            if !stale {
-                                info!(
-                                    last_consolidation = %last,
-                                    "Skipping auto-consolidation (last run was < {} hours ago)",
-                                    interval_hours
-                                );
-                            }
-                            stale
+                let should_run = match storage_clone.get_last_consolidation() {
+                    Ok(Some(last)) => {
+                        let elapsed = chrono::Utc::now() - last;
+                        let stale = elapsed > chrono::Duration::hours(interval_hours as i64);
+                        if !stale {
+                            info!(
+                                last_consolidation = %last,
+                                "Skipping auto-consolidation (last run was < {} hours ago)",
+                                interval_hours
+                            );
                         }
-                        Ok(None) => {
-                            info!("No previous consolidation found — running first auto-consolidation");
-                            true
-                        }
-                        Err(e) => {
-                            warn!("Could not read consolidation history: {} — running anyway", e);
-                            true
-                        }
+                        stale
+                    }
+                    Ok(None) => {
+                        info!("No previous consolidation found — running first auto-consolidation");
+                        true
+                    }
+                    Err(e) => {
+                        warn!("Could not read consolidation history: {} — running anyway", e);
+                        true
                     }
                 };
 
                 if should_run {
-                    let mut storage = storage_clone.lock().await;
-                    match storage.run_consolidation() {
+                    match storage_clone.run_consolidation() {
                         Ok(result) => {
                             info!(
                                 nodes_processed = result.nodes_processed,

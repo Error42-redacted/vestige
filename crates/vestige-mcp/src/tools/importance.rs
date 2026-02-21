@@ -47,7 +47,7 @@ struct ImportanceArgs {
 }
 
 pub async fn execute(
-    _storage: &Arc<Mutex<Storage>>,
+    _storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: Option<Value>,
 ) -> Result<Value, String> {
@@ -137,18 +137,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_content_fails() {
-        let storage = Arc::new(Mutex::new(
+        let storage = Arc::new(
             Storage::new(Some(std::path::PathBuf::from("/tmp/test_importance.db"))).unwrap(),
-        ));
+        );
         let result = execute(&storage, &test_cognitive(), Some(serde_json::json!({ "content": "" }))).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_basic_importance_score() {
-        let storage = Arc::new(Mutex::new(
+        let storage = Arc::new(
             Storage::new(Some(std::path::PathBuf::from("/tmp/test_importance2.db"))).unwrap(),
-        ));
+        );
         let result = execute(
             &storage,
             &test_cognitive(),

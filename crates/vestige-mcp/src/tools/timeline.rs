@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
 
 use vestige_core::Storage;
 
@@ -89,7 +89,7 @@ fn parse_datetime(s: &str) -> Result<DateTime<Utc>, String> {
 
 /// Execute memory_timeline tool
 pub async fn execute(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: TimelineArgs = match args {
@@ -130,7 +130,6 @@ pub async fn execute(
 
     let limit = args.limit.unwrap_or(50).clamp(1, 200);
 
-    let storage = storage.lock().await;
 
     // Query memories in time range
     let mut results = storage
@@ -189,15 +188,14 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+    async fn test_storage() -> (Arc<Storage>, TempDir) {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
-    async fn ingest_test_memory(storage: &Arc<Mutex<Storage>>, content: &str) {
-        let mut s = storage.lock().await;
-        s.ingest(vestige_core::IngestInput {
+    async fn ingest_test_memory(storage: &Arc<Storage>, content: &str) {
+        storage.ingest(vestige_core::IngestInput {
             content: content.to_string(),
             node_type: "fact".to_string(),
             source: None,

@@ -10,7 +10,6 @@ use axum::routing::{delete, get, post};
 use axum::Router;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -20,7 +19,7 @@ use state::AppState;
 use vestige_core::Storage;
 
 /// Build the axum router with all dashboard routes
-pub fn build_router(storage: Arc<Mutex<Storage>>, port: u16) -> Router {
+pub fn build_router(storage: Arc<Storage>, port: u16) -> Router {
     let state = AppState { storage };
 
     let origin = format!("http://127.0.0.1:{}", port)
@@ -59,7 +58,7 @@ pub fn build_router(storage: Arc<Mutex<Storage>>, port: u16) -> Router {
 
 /// Start the dashboard HTTP server (blocking — use in CLI mode)
 pub async fn start_dashboard(
-    storage: Arc<Mutex<Storage>>,
+    storage: Arc<Storage>,
     port: u16,
     open_browser: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -83,7 +82,7 @@ pub async fn start_dashboard(
 
 /// Start the dashboard as a background task (non-blocking — use in MCP server)
 pub async fn start_background(
-    storage: Arc<Mutex<Storage>>,
+    storage: Arc<Storage>,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app = build_router(storage, port);

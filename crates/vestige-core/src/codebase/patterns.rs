@@ -623,7 +623,6 @@ impl UserRepository for SqliteUserRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codebase::context::ProjectType;
 
     fn create_test_pattern() -> CodePattern {
         CodePattern {

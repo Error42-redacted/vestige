@@ -30,6 +30,13 @@ pub mod explore;
 pub mod predict;
 pub mod restore;
 
+// v1.8: Context Packets
+pub mod session_context;
+
+// v1.9: Autonomic tools
+pub mod health;
+pub mod graph;
+
 // Deprecated tools - kept for internal backwards compatibility
 // These modules are intentionally unused in the public API
 #[allow(dead_code)]

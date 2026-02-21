@@ -7,7 +7,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
 
 use vestige_core::{IngestInput, Storage};
 
@@ -52,7 +52,7 @@ struct MemoryBackup {
 }
 
 pub async fn execute(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: RestoreArgs = match args {
@@ -102,7 +102,6 @@ pub async fn execute(
         }));
     }
 
-    let mut storage_guard = storage.lock().await;
     let mut success_count = 0_usize;
     let mut error_count = 0_usize;
 
@@ -118,7 +117,7 @@ pub async fn execute(
             valid_until: None,
         };
 
-        match storage_guard.ingest(input) {
+        match storage.ingest(input) {
             Ok(_) => success_count += 1,
             Err(_) => error_count += 1,
         }
@@ -140,10 +139,10 @@ mod tests {
     use std::io::Write;
     use tempfile::TempDir;
 
-    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+    async fn test_storage() -> (Arc<Storage>, TempDir) {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
     fn write_temp_file(dir: &TempDir, name: &str, content: &str) -> String {

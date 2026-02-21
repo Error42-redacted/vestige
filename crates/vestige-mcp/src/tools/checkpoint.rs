@@ -6,7 +6,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
 
 use vestige_core::{IngestInput, Storage};
 
@@ -64,7 +64,7 @@ struct CheckpointItem {
 }
 
 pub async fn execute(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: CheckpointArgs = match args {
@@ -80,7 +80,6 @@ pub async fn execute(
         return Err("Maximum 20 items per checkpoint".to_string());
     }
 
-    let mut storage = storage.lock().await;
     let mut results = Vec::new();
     let mut created = 0u32;
     let mut updated = 0u32;
@@ -181,10 +180,10 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+    async fn test_storage() -> (Arc<Storage>, TempDir) {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
     #[test]

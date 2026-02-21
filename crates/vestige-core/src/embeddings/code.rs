@@ -39,7 +39,7 @@ impl CodeEmbedding {
     }
 
     /// Initialize the embedding model
-    pub fn init(&mut self) -> Result<(), EmbeddingError> {
+    pub fn init(&self) -> Result<(), EmbeddingError> {
         self.service.init()
     }
 

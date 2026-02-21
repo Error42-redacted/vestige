@@ -5,7 +5,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
 
 use vestige_core::{Rating, Storage};
 
@@ -38,7 +38,7 @@ struct ReviewArgs {
 }
 
 pub async fn execute(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args: ReviewArgs = match args {
@@ -57,7 +57,6 @@ pub async fn execute(
     let rating = Rating::from_i32(rating_value)
         .ok_or_else(|| "Invalid rating value".to_string())?;
 
-    let mut storage = storage.lock().await;
 
     // Get node before review for comparison
     let before = storage.get_node(&args.id).map_err(|e| e.to_string())?
@@ -102,14 +101,14 @@ mod tests {
     use tempfile::TempDir;
 
     /// Create a test storage instance with a temporary database
-    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+    async fn test_storage() -> (Arc<Storage>, TempDir) {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
     /// Helper to ingest test content and return node ID
-    async fn ingest_test_content(storage: &Arc<Mutex<Storage>>, content: &str) -> String {
+    async fn ingest_test_content(storage: &Arc<Storage>, content: &str) -> String {
         let input = IngestInput {
             content: content.to_string(),
             node_type: "fact".to_string(),
@@ -120,8 +119,7 @@ mod tests {
             valid_from: None,
             valid_until: None,
         };
-        let mut storage_lock = storage.lock().await;
-        let node = storage_lock.ingest(input).unwrap();
+        let node = storage.ingest(input).unwrap();
         node.id
     }
 

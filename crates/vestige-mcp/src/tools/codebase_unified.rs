@@ -85,7 +85,7 @@ struct CodebaseArgs {
 
 /// Execute the unified codebase tool
 pub async fn execute(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: Option<Value>,
 ) -> Result<Value, String> {
@@ -107,7 +107,7 @@ pub async fn execute(
 
 /// Remember a code pattern
 async fn execute_remember_pattern(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: &CodebaseArgs,
 ) -> Result<Value, String> {
@@ -153,10 +153,8 @@ async fn execute_remember_pattern(
         valid_until: None,
     };
 
-    let mut storage = storage.lock().await;
     let node = storage.ingest(input).map_err(|e| e.to_string())?;
     let node_id = node.id.clone();
-    drop(storage);
 
     // ====================================================================
     // COGNITIVE: Cross-project pattern recording
@@ -186,7 +184,7 @@ async fn execute_remember_pattern(
 
 /// Remember an architectural decision
 async fn execute_remember_decision(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: &CodebaseArgs,
 ) -> Result<Value, String> {
@@ -250,10 +248,8 @@ async fn execute_remember_decision(
         valid_until: None,
     };
 
-    let mut storage = storage.lock().await;
     let node = storage.ingest(input).map_err(|e| e.to_string())?;
     let node_id = node.id.clone();
-    drop(storage);
 
     // ====================================================================
     // COGNITIVE: Cross-project decision recording
@@ -282,12 +278,11 @@ async fn execute_remember_decision(
 
 /// Get codebase context (patterns and decisions)
 async fn execute_get_context(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: &CodebaseArgs,
 ) -> Result<Value, String> {
     let limit = args.limit.unwrap_or(10).clamp(1, 50);
-    let storage = storage.lock().await;
 
     // Build tag filter for codebase
     let tag_filter = args
@@ -304,7 +299,6 @@ async fn execute_get_context(
     let decisions = storage
         .get_nodes_by_type_and_tag("decision", tag_filter.as_deref(), limit)
         .unwrap_or_default();
-    drop(storage);
 
     let formatted_patterns: Vec<Value> = patterns
         .iter()
@@ -403,10 +397,10 @@ mod tests {
         Arc::new(Mutex::new(CognitiveEngine::new()))
     }
 
-    async fn test_storage() -> (Arc<Mutex<Storage>>, tempfile::TempDir) {
+    async fn test_storage() -> (Arc<Storage>, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
     #[tokio::test]

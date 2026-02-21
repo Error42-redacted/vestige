@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
 
     // Initialize storage (uses default path)
     println!("Initializing storage...");
-    let mut storage = Storage::new(None)?;
+    let storage = Storage::new(None)?;
 
     println!("Generating embeddings and ingesting memories...\n");
 

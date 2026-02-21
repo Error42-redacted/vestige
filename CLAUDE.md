@@ -1,4 +1,4 @@
-# Vestige v1.7.0 — Cognitive Memory System
+# Vestige v1.8.0 — Cognitive Memory System
 
 Vestige is your long-term memory. It implements real neuroscience: FSRS-6 spaced repetition, synaptic tagging, prediction error gating, hippocampal indexing, spreading activation, and 28 stateful cognitive modules. **Use it automatically.**
 
@@ -9,23 +9,30 @@ Vestige is your long-term memory. It implements real neuroscience: FSRS-6 spaced
 Every conversation, before responding to the user:
 
 ```
-1. search("user preferences instructions")     → recall who the user is
-2. search("[current project] context")          → recall project patterns/decisions
-3. intention → check (with current context)     → check for triggered reminders
-4. system_status                                → get system health + stats
-5. predict → predict needed memories            → proactive retrieval for context
-6. Check automationTriggers from system_status:
-   - lastDreamTimestamp null OR >24h ago OR savesSinceLastDream > 50 → call dream
-   - lastBackupTimestamp null OR >7 days ago → call backup
+1. session_context({                            → ONE CALL replaces steps 1-5
+     queries: ["user preferences", "[project] context"],
+     context: { codebase: "[project]", topics: ["[current topics]"] },
+     token_budget: 1000
+   })
+2. Check automationTriggers from response:
+   - needsDream == true  → call dream
+   - needsBackup == true → call backup
+   - needsGc == true     → call gc(dry_run: true)
    - totalMemories > 700 → call find_duplicates
-   - status == "degraded" or "critical" → call gc(dry_run: true)
 ```
 
 Say "Remembering..." then retrieve context before answering.
 
+> **Fallback:** If `session_context` is unavailable, use the 5-call sequence: `search` × 2 → `intention` check → `system_status` → `predict`.
+
 ---
 
-## The 18 Tools
+## The 19 Tools
+
+### Context Packets (1 tool) — v1.8.0
+| Tool | When to Use |
+|------|-------------|
+| `session_context` | **One-call session initialization.** Replaces 5 separate calls (search × 2, intention check, system_status, predict) with a single token-budgeted response. Returns markdown context + `automationTriggers` (needsDream/needsBackup/needsGc) + `expandable` IDs for on-demand full retrieval. Params: `queries` (string[]), `token_budget` (100-10000, default 1000), `context` ({codebase, topics, file}), `include_status/include_intentions/include_predictions` (bool). |
 
 ### Core Memory (1 tool)
 | Tool | When to Use |
@@ -35,7 +42,7 @@ Say "Remembering..." then retrieve context before answering.
 ### Unified Tools (4 tools)
 | Tool | Actions | When to Use |
 |------|---------|-------------|
-| `search` | query + filters | **Every time you need to recall anything.** Hybrid search (BM25 + semantic + convex combination fusion). 7-stage pipeline: overfetch → rerank → temporal boost → accessibility filter → context match → competition → spreading activation. Searching strengthens memory (Testing Effect). |
+| `search` | query + filters | **Every time you need to recall anything.** Hybrid search (BM25 + semantic + convex combination fusion). 7-stage pipeline: overfetch → rerank → temporal boost → accessibility filter → context match → competition → spreading activation. Searching strengthens memory (Testing Effect). **v1.8.0:** optional `token_budget` param (100-10000) limits response size; results exceeding budget moved to `expandable` array. |
 | `memory` | get, delete, state, promote, demote | Retrieve a full memory by ID, delete a memory, check its cognitive state (Active/Dormant/Silent/Unavailable), promote (thumbs up — increases retrieval strength), or demote (thumbs down — decreases retrieval strength, does NOT delete). |
 | `codebase` | remember_pattern, remember_decision, get_context | Store and recall code patterns, architectural decisions, and project context. The killer differentiator. |
 | `intention` | set, check, update, list | Prospective memory — "remember to do X when Y happens". Supports time, context, and event triggers. |
@@ -62,7 +69,7 @@ Say "Remembering..." then retrieve context before answering.
 ### Maintenance (5 tools)
 | Tool | When to Use |
 |------|-------------|
-| `system_status` | **Combined health + stats.** Returns status (healthy/degraded/critical/empty), full statistics, FSRS preview, cognitive module health, state distribution, warnings, and recommendations. At session start. |
+| `system_status` | **Combined health + stats.** Returns status (healthy/degraded/critical/empty), full statistics, FSRS preview, cognitive module health, state distribution, warnings, and recommendations. At session start (or use `session_context` which includes this). |
 | `consolidate` | Run FSRS-6 consolidation cycle. Applies decay, generates embeddings, maintenance. At session end, when retention drops. |
 | `backup` | Create SQLite database backup. Before major upgrades, weekly. |
 | `export` | Export memories as JSON/JSONL with tag and date filters. |
@@ -202,11 +209,12 @@ Memory is retrieval. Searching strengthens memory. Search liberally, save aggres
 
 ## Development
 
-- **Crate:** `vestige-mcp` v1.7.0, Rust 2024 edition
-- **Tests:** 335 tests, zero warnings (`cargo test -p vestige-mcp`)
+- **Crate:** `vestige-mcp` v1.8.0, Rust 2024 edition, Rust 1.93.1
+- **Tests:** 651 tests (313 core + 338 mcp), zero warnings
 - **Build:** `cargo build --release -p vestige-mcp`
 - **Features:** `embeddings` + `vector-search` (default on)
-- **Architecture:** `McpServer` holds `Arc<Mutex<Storage>>` + `Arc<Mutex<CognitiveEngine>>`
+- **Architecture:** `McpServer` holds `Arc<Storage>` + `Arc<Mutex<CognitiveEngine>>`
+- **Storage:** Interior mutability — `Storage` uses `Mutex<Connection>` for reader/writer split, all methods take `&self`. WAL mode for concurrent reads + writes.
 - **Entry:** `src/main.rs` → stdio JSON-RPC server
 - **Tools:** `src/tools/` — one file per tool, each exports `schema()` + `execute()`
 - **Cognitive:** `src/cognitive.rs` — 28-field struct, initialized once at startup

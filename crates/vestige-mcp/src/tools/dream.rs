@@ -22,7 +22,7 @@ pub fn schema() -> serde_json::Value {
 }
 
 pub async fn execute(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     args: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
@@ -32,9 +32,41 @@ pub async fn execute(
         .and_then(|v| v.as_u64())
         .unwrap_or(50) as usize;
 
-    let storage_guard = storage.lock().await;
-    let all_nodes = storage_guard.get_all_nodes(memory_count as i32, 0)
+    // v1.9.0: Waking SWR tagging — preferential replay of tagged memories (70/30 split)
+    let tagged_nodes = storage.get_waking_tagged_memories(memory_count as i32)
+        .unwrap_or_default();
+    let tagged_count = tagged_nodes.len();
+
+    // Calculate how many tagged vs random to include
+    let tagged_target = (memory_count * 7 / 10).min(tagged_count); // 70% tagged
+    let _random_target = memory_count.saturating_sub(tagged_target);  // 30% random (used for logging)
+
+    // Build the dream memory set: tagged memories first, then fill with random
+    let tagged_ids: std::collections::HashSet<String> = tagged_nodes.iter()
+        .take(tagged_target)
+        .map(|n| n.id.clone())
+        .collect();
+
+    let random_nodes = storage.get_all_nodes(memory_count as i32, 0)
         .map_err(|e| format!("Failed to load memories: {}", e))?;
+
+    let mut all_nodes: Vec<_> = tagged_nodes.into_iter().take(tagged_target).collect();
+    for node in random_nodes {
+        if !tagged_ids.contains(&node.id) && all_nodes.len() < memory_count {
+            all_nodes.push(node);
+        }
+    }
+    // If still under capacity (e.g., all memories are tagged), fill from remaining tagged
+    if all_nodes.len() < memory_count {
+        let used_ids: std::collections::HashSet<String> = all_nodes.iter().map(|n| n.id.clone()).collect();
+        let remaining_tagged = storage.get_waking_tagged_memories(memory_count as i32)
+            .unwrap_or_default();
+        for node in remaining_tagged {
+            if !used_ids.contains(&node.id) && all_nodes.len() < memory_count {
+                all_nodes.push(node);
+            }
+        }
+    }
 
     if all_nodes.len() < 5 {
         return Ok(serde_json::json!({
@@ -48,23 +80,57 @@ pub async fn execute(
         vestige_core::DreamMemory {
             id: n.id.clone(),
             content: n.content.clone(),
-            embedding: storage_guard.get_node_embedding(&n.id).ok().flatten(),
+            embedding: storage.get_node_embedding(&n.id).ok().flatten(),
             tags: n.tags.clone(),
             created_at: n.created_at,
             access_count: n.reps as u32,
         }
     }).collect();
-    // Drop storage lock before taking cognitive lock (strict ordering)
-    drop(storage_guard);
 
     let cog = cognitive.lock().await;
+    let pre_dream_count = cog.dreamer.get_connections().len();
     let dream_result = cog.dreamer.dream(&dream_memories).await;
     let insights = cog.dreamer.synthesize_insights(&dream_memories);
+    let all_connections = cog.dreamer.get_connections();
     drop(cog);
+
+    // v1.9.0: Persist only NEW connections from this dream (skip accumulated ones)
+    let new_connections = &all_connections[pre_dream_count..];
+    let mut connections_persisted = 0u64;
+    {
+        let now = Utc::now();
+        for conn in new_connections {
+            let link_type = match conn.connection_type {
+                vestige_core::DiscoveredConnectionType::Semantic => "semantic",
+                vestige_core::DiscoveredConnectionType::SharedConcept => "shared_concepts",
+                vestige_core::DiscoveredConnectionType::Temporal => "temporal",
+                vestige_core::DiscoveredConnectionType::Complementary => "complementary",
+                vestige_core::DiscoveredConnectionType::CausalChain => "causal",
+            };
+            let record = vestige_core::ConnectionRecord {
+                source_id: conn.from_id.clone(),
+                target_id: conn.to_id.clone(),
+                strength: conn.similarity,
+                link_type: link_type.to_string(),
+                created_at: now,
+                last_activated: now,
+                activation_count: 1,
+            };
+            if storage.save_connection(&record).is_ok() {
+                connections_persisted += 1;
+            }
+        }
+        if connections_persisted > 0 {
+            tracing::info!(
+                connections_persisted = connections_persisted,
+                "Dream: persisted {} connections to database",
+                connections_persisted
+            );
+        }
+    }
 
     // Persist dream history (non-fatal on failure — dream still happened)
     {
-        let mut storage_guard = storage.lock().await;
         let record = DreamHistoryRecord {
             dreamed_at: Utc::now(),
             duration_ms: dream_result.duration_ms as i64,
@@ -74,14 +140,19 @@ pub async fn execute(
             memories_strengthened: dream_result.memories_strengthened as i32,
             memories_compressed: dream_result.memories_compressed as i32,
         };
-        if let Err(e) = storage_guard.save_dream_history(&record) {
+        if let Err(e) = storage.save_dream_history(&record) {
             tracing::warn!("Failed to persist dream history: {}", e);
         }
     }
 
+    // v1.9.0: Clear waking tags after dream processes them
+    let tags_cleared = storage.clear_waking_tags().unwrap_or(0);
+
     Ok(serde_json::json!({
         "status": "dreamed",
         "memoriesReplayed": dream_memories.len(),
+        "wakingTagsProcessed": tagged_target,
+        "wakingTagsCleared": tags_cleared,
         "insights": insights.iter().map(|i| serde_json::json!({
             "insight_type": format!("{:?}", i.insight_type),
             "insight": i.insight,
@@ -89,8 +160,10 @@ pub async fn execute(
             "confidence": i.confidence,
             "novelty_score": i.novelty_score,
         })).collect::<Vec<_>>(),
+        "connectionsPersisted": connections_persisted,
         "stats": {
             "new_connections_found": dream_result.new_connections_found,
+            "connections_persisted": connections_persisted,
             "memories_strengthened": dream_result.memories_strengthened,
             "memories_compressed": dream_result.memories_compressed,
             "insights_generated": dream_result.insights_generated.len(),
@@ -109,16 +182,15 @@ mod tests {
         Arc::new(Mutex::new(CognitiveEngine::new()))
     }
 
-    async fn test_storage() -> (Arc<Mutex<Storage>>, TempDir) {
+    async fn test_storage() -> (Arc<Storage>, TempDir) {
         let dir = TempDir::new().unwrap();
         let storage = Storage::new(Some(dir.path().join("test.db"))).unwrap();
-        (Arc::new(Mutex::new(storage)), dir)
+        (Arc::new(storage), dir)
     }
 
-    async fn ingest_n_memories(storage: &Arc<Mutex<Storage>>, n: usize) {
-        let mut s = storage.lock().await;
+    async fn ingest_n_memories(storage: &Arc<Storage>, n: usize) {
         for i in 0..n {
-            s.ingest(vestige_core::IngestInput {
+            storage.ingest(vestige_core::IngestInput {
                 content: format!("Dream test memory number {}", i),
                 node_type: "fact".to_string(),
                 source: None,
@@ -216,8 +288,7 @@ mod tests {
 
         // Before dream: no dream history
         {
-            let s = storage.lock().await;
-            assert!(s.get_last_dream().unwrap().is_none());
+            assert!(storage.get_last_dream().unwrap().is_none());
         }
 
         let result = execute(&storage, &test_cognitive(), None).await;
@@ -227,8 +298,7 @@ mod tests {
 
         // After dream: dream history should exist
         {
-            let s = storage.lock().await;
-            let last = s.get_last_dream().unwrap();
+            let last = storage.get_last_dream().unwrap();
             assert!(last.is_some(), "Dream should have been persisted to database");
         }
     }

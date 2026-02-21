@@ -115,7 +115,7 @@ It remembers.
 
 ## Important: Tool Limit
 
-Windsurf has a **hard cap of 100 tools** across all MCP servers. Vestige uses ~18 tools, leaving plenty of room for other servers.
+Windsurf has a **hard cap of 100 tools** across all MCP servers. Vestige uses 19 tools, leaving plenty of room for other servers.
 
 ---
 

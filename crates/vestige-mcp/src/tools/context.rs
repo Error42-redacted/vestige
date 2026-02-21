@@ -6,7 +6,7 @@
 use chrono::Utc;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+
 
 use vestige_core::{RecallInput, SearchMode, Storage};
 
@@ -51,7 +51,7 @@ pub fn schema() -> Value {
 }
 
 pub async fn execute(
-    storage: &Arc<Mutex<Storage>>,
+    storage: &Arc<Storage>,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args = args.ok_or("Missing arguments")?;
@@ -73,7 +73,6 @@ pub async fn execute(
 
     let limit = args["limit"].as_i64().unwrap_or(10) as i32;
 
-    let storage = storage.lock().await;
     let now = Utc::now();
 
     // Get candidate memories

@@ -3,12 +3,11 @@
 //! memory:// URI scheme resources for the MCP server.
 
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use vestige_core::Storage;
 
 /// Read a memory:// resource
-pub async fn read(storage: &Arc<Mutex<Storage>>, uri: &str) -> Result<String, String> {
+pub async fn read(storage: &Arc<Storage>, uri: &str) -> Result<String, String> {
     let path = uri.strip_prefix("memory://").unwrap_or("");
 
     // Parse query parameters if present
@@ -50,8 +49,7 @@ fn parse_query_param(query: Option<&str>, key: &str, default: i32) -> i32 {
         .clamp(1, 100)
 }
 
-async fn read_stats(storage: &Arc<Mutex<Storage>>) -> Result<String, String> {
-    let storage = storage.lock().await;
+async fn read_stats(storage: &Arc<Storage>) -> Result<String, String> {
     let stats = storage.get_stats().map_err(|e| e.to_string())?;
 
     let embedding_coverage = if stats.total_nodes > 0 {
@@ -88,8 +86,7 @@ async fn read_stats(storage: &Arc<Mutex<Storage>>) -> Result<String, String> {
     serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
 
-async fn read_recent(storage: &Arc<Mutex<Storage>>, limit: i32) -> Result<String, String> {
-    let storage = storage.lock().await;
+async fn read_recent(storage: &Arc<Storage>, limit: i32) -> Result<String, String> {
     let nodes = storage.get_all_nodes(limit, 0).map_err(|e| e.to_string())?;
 
     let items: Vec<serde_json::Value> = nodes
@@ -118,9 +115,7 @@ async fn read_recent(storage: &Arc<Mutex<Storage>>, limit: i32) -> Result<String
     serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
 
-async fn read_decaying(storage: &Arc<Mutex<Storage>>) -> Result<String, String> {
-    let storage = storage.lock().await;
-
+async fn read_decaying(storage: &Arc<Storage>) -> Result<String, String> {
     // Get nodes with low retention (below 0.5)
     let all_nodes = storage.get_all_nodes(100, 0).map_err(|e| e.to_string())?;
 
@@ -176,8 +171,7 @@ async fn read_decaying(storage: &Arc<Mutex<Storage>>) -> Result<String, String> 
     serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
 
-async fn read_due(storage: &Arc<Mutex<Storage>>) -> Result<String, String> {
-    let storage = storage.lock().await;
+async fn read_due(storage: &Arc<Storage>) -> Result<String, String> {
     let nodes = storage.get_review_queue(20).map_err(|e| e.to_string())?;
 
     let items: Vec<serde_json::Value> = nodes
@@ -208,8 +202,7 @@ async fn read_due(storage: &Arc<Mutex<Storage>>) -> Result<String, String> {
     serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
 
-async fn read_intentions(storage: &Arc<Mutex<Storage>>) -> Result<String, String> {
-    let storage = storage.lock().await;
+async fn read_intentions(storage: &Arc<Storage>) -> Result<String, String> {
     let intentions = storage.get_active_intentions().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now();
 
@@ -247,8 +240,7 @@ async fn read_intentions(storage: &Arc<Mutex<Storage>>) -> Result<String, String
     serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
 
-async fn read_triggered_intentions(storage: &Arc<Mutex<Storage>>) -> Result<String, String> {
-    let storage = storage.lock().await;
+async fn read_triggered_intentions(storage: &Arc<Storage>) -> Result<String, String> {
     let overdue = storage.get_overdue_intentions().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now();
 
@@ -293,8 +285,7 @@ async fn read_triggered_intentions(storage: &Arc<Mutex<Storage>>) -> Result<Stri
     serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
 
-async fn read_insights(storage: &Arc<Mutex<Storage>>) -> Result<String, String> {
-    let storage = storage.lock().await;
+async fn read_insights(storage: &Arc<Storage>) -> Result<String, String> {
     let insights = storage.get_insights(50).map_err(|e| e.to_string())?;
 
     let pending: Vec<_> = insights.iter().filter(|i| i.feedback.is_none()).collect();
@@ -327,8 +318,7 @@ async fn read_insights(storage: &Arc<Mutex<Storage>>) -> Result<String, String> 
     serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
 
-async fn read_consolidation_log(storage: &Arc<Mutex<Storage>>) -> Result<String, String> {
-    let storage = storage.lock().await;
+async fn read_consolidation_log(storage: &Arc<Storage>) -> Result<String, String> {
     let history = storage.get_consolidation_history(20).map_err(|e| e.to_string())?;
     let last_run = storage.get_last_consolidation().map_err(|e| e.to_string())?;
 

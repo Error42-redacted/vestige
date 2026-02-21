@@ -3,12 +3,11 @@
 //! codebase:// URI scheme resources for the MCP server.
 
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use vestige_core::{RecallInput, SearchMode, Storage};
 
 /// Read a codebase:// resource
-pub async fn read(storage: &Arc<Mutex<Storage>>, uri: &str) -> Result<String, String> {
+pub async fn read(storage: &Arc<Storage>, uri: &str) -> Result<String, String> {
     let path = uri.strip_prefix("codebase://").unwrap_or("");
 
     // Parse query parameters if present
@@ -38,9 +37,7 @@ fn parse_codebase_param(query: Option<&str>) -> Option<String> {
     })
 }
 
-async fn read_structure(storage: &Arc<Mutex<Storage>>) -> Result<String, String> {
-    let storage = storage.lock().await;
-
+async fn read_structure(storage: &Arc<Storage>) -> Result<String, String> {
     // Get all pattern and decision nodes to infer structure
     // NOTE: We run separate queries because FTS5 sanitization removes OR operators
     // and wraps queries in quotes (phrase search), so "pattern OR decision" would
@@ -92,8 +89,7 @@ async fn read_structure(storage: &Arc<Mutex<Storage>>) -> Result<String, String>
     serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
 
-async fn read_patterns(storage: &Arc<Mutex<Storage>>, query: Option<&str>) -> Result<String, String> {
-    let storage = storage.lock().await;
+async fn read_patterns(storage: &Arc<Storage>, query: Option<&str>) -> Result<String, String> {
     let codebase = parse_codebase_param(query);
 
     let search_query = match &codebase {
@@ -135,8 +131,7 @@ async fn read_patterns(storage: &Arc<Mutex<Storage>>, query: Option<&str>) -> Re
     serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
 
-async fn read_decisions(storage: &Arc<Mutex<Storage>>, query: Option<&str>) -> Result<String, String> {
-    let storage = storage.lock().await;
+async fn read_decisions(storage: &Arc<Storage>, query: Option<&str>) -> Result<String, String> {
     let codebase = parse_codebase_param(query);
 
     let search_query = match &codebase {

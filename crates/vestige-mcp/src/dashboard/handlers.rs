@@ -30,53 +30,50 @@ pub async fn list_memories(
     State(state): State<AppState>,
     Query(params): Query<MemoryListParams>,
 ) -> Result<Json<Value>, StatusCode> {
-    let storage = state.storage.lock().await;
     let limit = params.limit.unwrap_or(50).clamp(1, 200);
     let offset = params.offset.unwrap_or(0).max(0);
 
     if let Some(query) = params.q.as_ref().filter(|q| !q.trim().is_empty()) {
-        {
-            // Use hybrid search
-            let results = storage
-                .hybrid_search(query, limit, 0.3, 0.7)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        // Use hybrid search
+        let results = state.storage
+            .hybrid_search(query, limit, 0.3, 0.7)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-            let formatted: Vec<Value> = results
-                .into_iter()
-                .filter(|r| {
-                    if let Some(min_ret) = params.min_retention {
-                        r.node.retention_strength >= min_ret
-                    } else {
-                        true
-                    }
+        let formatted: Vec<Value> = results
+            .into_iter()
+            .filter(|r| {
+                if let Some(min_ret) = params.min_retention {
+                    r.node.retention_strength >= min_ret
+                } else {
+                    true
+                }
+            })
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.node.id,
+                    "content": r.node.content,
+                    "nodeType": r.node.node_type,
+                    "tags": r.node.tags,
+                    "retentionStrength": r.node.retention_strength,
+                    "storageStrength": r.node.storage_strength,
+                    "retrievalStrength": r.node.retrieval_strength,
+                    "createdAt": r.node.created_at.to_rfc3339(),
+                    "updatedAt": r.node.updated_at.to_rfc3339(),
+                    "combinedScore": r.combined_score,
+                    "source": r.node.source,
+                    "reviewCount": r.node.reps,
                 })
-                .map(|r| {
-                    serde_json::json!({
-                        "id": r.node.id,
-                        "content": r.node.content,
-                        "nodeType": r.node.node_type,
-                        "tags": r.node.tags,
-                        "retentionStrength": r.node.retention_strength,
-                        "storageStrength": r.node.storage_strength,
-                        "retrievalStrength": r.node.retrieval_strength,
-                        "createdAt": r.node.created_at.to_rfc3339(),
-                        "updatedAt": r.node.updated_at.to_rfc3339(),
-                        "combinedScore": r.combined_score,
-                        "source": r.node.source,
-                        "reviewCount": r.node.reps,
-                    })
-                })
-                .collect();
+            })
+            .collect();
 
-            return Ok(Json(serde_json::json!({
-                "total": formatted.len(),
-                "memories": formatted,
-            })));
-        }
+        return Ok(Json(serde_json::json!({
+            "total": formatted.len(),
+            "memories": formatted,
+        })));
     }
 
     // No search query — list all memories
-    let mut nodes = storage
+    let mut nodes = state.storage
         .get_all_nodes(limit, offset)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -121,8 +118,7 @@ pub async fn get_memory(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, StatusCode> {
-    let storage = state.storage.lock().await;
-    let node = storage
+    let node = state.storage
         .get_node(&id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -153,8 +149,7 @@ pub async fn delete_memory(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, StatusCode> {
-    let mut storage = state.storage.lock().await;
-    let deleted = storage
+    let deleted = state.storage
         .delete_node(&id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -170,8 +165,7 @@ pub async fn promote_memory(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, StatusCode> {
-    let storage = state.storage.lock().await;
-    let node = storage
+    let node = state.storage
         .promote_memory(&id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -187,8 +181,7 @@ pub async fn demote_memory(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, StatusCode> {
-    let storage = state.storage.lock().await;
-    let node = storage
+    let node = state.storage
         .demote_memory(&id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -203,8 +196,7 @@ pub async fn demote_memory(
 pub async fn get_stats(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, StatusCode> {
-    let storage = state.storage.lock().await;
-    let stats = storage
+    let stats = state.storage
         .get_stats()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -239,12 +231,11 @@ pub async fn get_timeline(
     State(state): State<AppState>,
     Query(params): Query<TimelineParams>,
 ) -> Result<Json<Value>, StatusCode> {
-    let storage = state.storage.lock().await;
     let days = params.days.unwrap_or(7).clamp(1, 90);
     let limit = params.limit.unwrap_or(200).clamp(1, 500);
 
     let start = Utc::now() - Duration::days(days);
-    let nodes = storage
+    let nodes = state.storage
         .query_time_range(Some(start), Some(Utc::now()), limit)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -292,8 +283,7 @@ pub async fn get_timeline(
 pub async fn health_check(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, StatusCode> {
-    let storage = state.storage.lock().await;
-    let stats = storage
+    let stats = state.storage
         .get_stats()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

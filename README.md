@@ -9,12 +9,13 @@
 
 > Your AI forgets everything between sessions. Vestige fixes that. Built on 130 years of memory research — FSRS-6 spaced repetition, prediction error gating, synaptic tagging — all running in a single Rust binary, 100% local.
 
-### What's New in v1.6.0
+### What's New in v1.8.0
 
-- **6x vector storage reduction** — F16 quantization + Matryoshka 256-dim truncation
-- **Neural reranking** — Jina cross-encoder reranker for ~20% better retrieval
-- **Instant startup** — cross-encoder loads in background, zero blocking
-- **Auto-migration** — old 768-dim embeddings seamlessly upgraded
+- **One-call session init** — new `session_context` tool replaces 5 calls (~15K → ~500 tokens)
+- **Token budgeting** — `token_budget` parameter on `search` and `session_context` for cost control
+- **Reader/writer split** — concurrent SQLite reads via WAL mode, `Arc<Storage>` everywhere
+- **int8 vectors** — 2x memory savings with <1% recall loss
+- **FTS5 porter stemmer** — 15-30% better keyword search via stemming
 
 See [CHANGELOG](CHANGELOG.md) for full version history.
 
@@ -127,42 +128,44 @@ This isn't a key-value store with an embedding model bolted on. Vestige implemen
 
 ---
 
-## Tools — 23 MCP Tools
+## Tools — 19 MCP Tools
+
+### Context Packets (v1.8.0)
+| Tool | What It Does |
+|------|-------------|
+| `session_context` | **One-call session init** — replaces 5 calls with a single token-budgeted response. Returns context, automation triggers, and expandable memory IDs |
 
 ### Core Memory
 | Tool | What It Does |
 |------|-------------|
-| `search` | 7-stage cognitive search — keyword + semantic + RRF fusion + reranking + temporal boost + competition + spreading activation |
-| `smart_ingest` | Intelligent storage with automatic CREATE/UPDATE/SUPERSEDE via Prediction Error Gating |
-| `ingest` | Direct memory storage with cognitive post-processing |
-| `memory` | Get, delete, or check memory accessibility state |
+| `search` | 7-stage cognitive search — keyword + semantic + convex fusion + reranking + temporal boost + competition + spreading activation. Optional `token_budget` for cost control |
+| `smart_ingest` | Intelligent storage with automatic CREATE/UPDATE/SUPERSEDE via Prediction Error Gating. Batch mode for session-end saves |
+| `memory` | Get, delete, check state, promote (thumbs up), or demote (thumbs down) |
 | `codebase` | Remember code patterns and architectural decisions per-project |
 | `intention` | Prospective memory — "remind me to X when Y happens" |
 
-### Cognitive Engine (v1.5.0)
+### Cognitive Engine
 | Tool | What It Does |
 |------|-------------|
 | `dream` | Memory consolidation via replay — discovers hidden connections, synthesizes insights |
-| `explore_connections` | Graph traversal — build reasoning chains, find associations via spreading activation, discover bridges between memories |
+| `explore_connections` | Graph traversal — reasoning chains, associations via spreading activation, bridges between memories |
 | `predict` | Proactive retrieval — predicts what memories you'll need next based on context and activity patterns |
-| `restore` | Restore memories from JSON backup files |
 
-### Feedback & Scoring
+### Scoring & Dedup
 | Tool | What It Does |
 |------|-------------|
-| `promote_memory` / `demote_memory` | Feedback loop with full cognitive pipeline — reward signals, reconsolidation, competition |
 | `importance_score` | 4-channel neuroscience scoring (novelty, arousal, reward, attention) |
+| `find_duplicates` | Self-healing — detect and merge redundant memories via cosine similarity |
 
-### Auto-Save & Maintenance
+### Maintenance & Data
 | Tool | What It Does |
 |------|-------------|
-| `session_checkpoint` | Batch-save up to 20 items in one call |
-| `find_duplicates` | Self-healing — detect and merge redundant memories via cosine similarity |
+| `system_status` | Combined health + statistics + cognitive state breakdown + recommendations |
 | `consolidate` | Run FSRS-6 decay cycle (also runs automatically every 6 hours) |
 | `memory_timeline` | Browse memories chronologically, grouped by day |
 | `memory_changelog` | Audit trail of memory state transitions |
-| `health_check` / `stats` | System health, retention curves, cognitive state breakdown |
 | `backup` / `export` / `gc` | Database backup, JSON export, garbage collection |
+| `restore` | Restore memories from JSON backup files |
 
 ---
 

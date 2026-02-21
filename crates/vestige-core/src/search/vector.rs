@@ -137,7 +137,7 @@ impl VectorIndex {
         let options = IndexOptions {
             dimensions: config.dimensions,
             metric: config.metric,
-            quantization: ScalarKind::F16,
+            quantization: ScalarKind::I8,
             connectivity: config.connectivity,
             expansion_add: config.expansion_add,
             expansion_search: config.expansion_search,
@@ -325,7 +325,7 @@ impl VectorIndex {
         let options = IndexOptions {
             dimensions: config.dimensions,
             metric: config.metric,
-            quantization: ScalarKind::F16,
+            quantization: ScalarKind::I8,
             connectivity: config.connectivity,
             expansion_add: config.expansion_add,
             expansion_search: config.expansion_search,
