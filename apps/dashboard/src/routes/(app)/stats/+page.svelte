@@ -27,9 +27,12 @@
 	}
 
 	async function runConsolidation() {
-		try { await api.consolidate(); } catch { /* ignore */ }
-		// Refresh
-		[stats, health, retention] = await Promise.all([api.stats(), api.health(), api.retentionDistribution()]);
+		try {
+			await api.consolidate();
+			[stats, health, retention] = await Promise.all([api.stats(), api.health(), api.retentionDistribution()]);
+		} catch {
+			// API not available
+		}
 	}
 </script>
 

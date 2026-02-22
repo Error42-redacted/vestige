@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { api } from '$stores/api';
 	import { isConnected, memoryCount, avgRetention } from '$stores/websocket';
 
@@ -16,7 +17,7 @@
 	// Health
 	let health = $state<Record<string, unknown> | null>(null);
 
-	$effect(() => {
+	onMount(() => {
 		loadAllData();
 	});
 
@@ -112,21 +113,21 @@
 			{#if consolidationResult}
 				<div class="bg-deep/50 p-3 rounded-lg border border-subtle/10">
 					<div class="grid grid-cols-3 gap-3 text-center">
-						{#if consolidationResult.processed !== undefined}
+						{#if consolidationResult.nodesProcessed !== undefined}
 							<div>
-								<div class="text-lg text-text font-semibold">{consolidationResult.processed}</div>
+								<div class="text-lg text-text font-semibold">{consolidationResult.nodesProcessed}</div>
 								<div class="text-[10px] text-muted">Processed</div>
 							</div>
 						{/if}
-						{#if consolidationResult.decayed !== undefined}
+						{#if consolidationResult.decayApplied !== undefined}
 							<div>
-								<div class="text-lg text-decay font-semibold">{consolidationResult.decayed}</div>
+								<div class="text-lg text-decay font-semibold">{consolidationResult.decayApplied}</div>
 								<div class="text-[10px] text-muted">Decayed</div>
 							</div>
 						{/if}
-						{#if consolidationResult.embedded !== undefined}
+						{#if consolidationResult.embeddingsGenerated !== undefined}
 							<div>
-								<div class="text-lg text-synapse-glow font-semibold">{consolidationResult.embedded}</div>
+								<div class="text-lg text-synapse-glow font-semibold">{consolidationResult.embeddingsGenerated}</div>
 								<div class="text-[10px] text-muted">Embedded</div>
 							</div>
 						{/if}
@@ -181,10 +182,10 @@
 				<span class="text-recall">◫</span> Retention Distribution
 			</h2>
 			<div class="p-4 bg-surface/30 border border-subtle/20 rounded-lg">
-				{#if retentionDist.buckets && Array.isArray(retentionDist.buckets)}
+				{#if retentionDist.distribution && Array.isArray(retentionDist.distribution)}
 					<div class="flex items-end gap-1 h-32">
-						{#each retentionDist.buckets as bucket, i}
-							{@const maxCount = Math.max(...(retentionDist.buckets as {count: number}[]).map((b: {count: number}) => b.count), 1)}
+						{#each retentionDist.distribution as bucket, i}
+							{@const maxCount = Math.max(...(retentionDist.distribution as {count: number}[]).map((b: {count: number}) => b.count), 1)}
 							{@const height = ((bucket as {count: number}).count / maxCount) * 100}
 							{@const color = i < 2 ? '#ef4444' : i < 4 ? '#f59e0b' : i < 7 ? '#6366f1' : '#10b981'}
 							<div class="flex-1 flex flex-col items-center gap-1">

@@ -124,12 +124,15 @@
 								<div>Created: {new Date(memory.createdAt).toLocaleDateString()}</div>
 							</div>
 							<div class="flex gap-2">
-								<button onclick={(e) => { e.stopPropagation(); api.memories.promote(memory.id); }}
-									class="px-3 py-1.5 bg-recall/20 text-recall text-xs rounded hover:bg-recall/30">Promote</button>
-								<button onclick={(e) => { e.stopPropagation(); api.memories.demote(memory.id); }}
-									class="px-3 py-1.5 bg-decay/20 text-decay text-xs rounded hover:bg-decay/30">Demote</button>
-								<button onclick={(e) => { e.stopPropagation(); api.memories.delete(memory.id); loadMemories(); }}
-									class="px-3 py-1.5 bg-decay/10 text-decay/60 text-xs rounded hover:bg-decay/20 ml-auto">Delete</button>
+								<span role="button" tabindex="0" onclick={(e) => { e.stopPropagation(); api.memories.promote(memory.id); }}
+									onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); api.memories.promote(memory.id); } }}
+									class="px-3 py-1.5 bg-recall/20 text-recall text-xs rounded hover:bg-recall/30 cursor-pointer select-none">Promote</span>
+								<span role="button" tabindex="0" onclick={(e) => { e.stopPropagation(); api.memories.demote(memory.id); }}
+									onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); api.memories.demote(memory.id); } }}
+									class="px-3 py-1.5 bg-decay/20 text-decay text-xs rounded hover:bg-decay/30 cursor-pointer select-none">Demote</span>
+								<span role="button" tabindex="0" onclick={async (e) => { e.stopPropagation(); await api.memories.delete(memory.id); loadMemories(); }}
+									onkeydown={async (e) => { if (e.key === 'Enter') { e.stopPropagation(); await api.memories.delete(memory.id); loadMemories(); } }}
+									class="px-3 py-1.5 bg-decay/10 text-decay/60 text-xs rounded hover:bg-decay/20 ml-auto cursor-pointer select-none">Delete</span>
 							</div>
 						</div>
 					{/if}

@@ -157,6 +157,10 @@ pub async fn delete_memory(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if deleted {
+        state.emit(VestigeEvent::MemoryDeleted {
+            id: id.clone(),
+            timestamp: chrono::Utc::now(),
+        });
         Ok(Json(serde_json::json!({ "deleted": true, "id": id })))
     } else {
         Err(StatusCode::NOT_FOUND)
@@ -171,6 +175,12 @@ pub async fn promote_memory(
     let node = state.storage
         .promote_memory(&id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state.emit(VestigeEvent::MemoryPromoted {
+        id: node.id.clone(),
+        new_retention: node.retention_strength,
+        timestamp: chrono::Utc::now(),
+    });
 
     Ok(Json(serde_json::json!({
         "promoted": true,
@@ -187,6 +197,12 @@ pub async fn demote_memory(
     let node = state.storage
         .demote_memory(&id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state.emit(VestigeEvent::MemoryDemoted {
+        id: node.id.clone(),
+        new_retention: node.retention_strength,
+        timestamp: chrono::Utc::now(),
+    });
 
     Ok(Json(serde_json::json!({
         "demoted": true,

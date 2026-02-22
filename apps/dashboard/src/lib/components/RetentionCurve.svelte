@@ -16,7 +16,7 @@
 	}
 
 	// Generate SVG path for the decay curve
-	let curvePath = $derived(() => {
+	let curvePath = $derived.by(() => {
 		const points: string[] = [];
 		const maxDays = Math.max(stability * 3, 30);
 		const padding = 4;
@@ -56,10 +56,10 @@
 		<line x1="4" y1="{4 + (height - 8) * 0.8}" x2="{width - 4}" y2="{4 + (height - 8) * 0.8}" stroke="#ef444430" stroke-width="0.5" stroke-dasharray="2,4" />
 
 		<!-- Decay curve -->
-		<path d={curvePath()} fill="none" stroke="#6366f1" stroke-width="2" stroke-linecap="round" />
+		<path d={curvePath} fill="none" stroke="#6366f1" stroke-width="2" stroke-linecap="round" />
 
 		<!-- Fill under curve -->
-		<path d="{curvePath()} L{width - 4},{height - 4} L4,{height - 4} Z" fill="url(#curveGrad)" opacity="0.15" />
+		<path d="{curvePath} L{width - 4},{height - 4} L4,{height - 4} Z" fill="url(#curveGrad)" opacity="0.15" />
 
 		<!-- Current retention dot -->
 		<circle cx="4" cy="{4 + (1 - retention) * (height - 8)}" r="3" fill={retColor(retention)} />

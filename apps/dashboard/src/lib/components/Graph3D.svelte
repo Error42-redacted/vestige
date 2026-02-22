@@ -69,6 +69,19 @@
 	onDestroy(() => {
 		cancelAnimationFrame(animationId);
 		window.removeEventListener('resize', onResize);
+		container?.removeEventListener('pointermove', onPointerMove);
+		container?.removeEventListener('click', onClick);
+		// Dispose Three.js resources to prevent GPU memory leaks
+		scene?.traverse((obj: THREE.Object3D) => {
+			if (obj instanceof THREE.Mesh || obj instanceof THREE.InstancedMesh) {
+				obj.geometry?.dispose();
+				if (Array.isArray(obj.material)) {
+					obj.material.forEach((m: THREE.Material) => m.dispose());
+				} else if (obj.material) {
+					(obj.material as THREE.Material).dispose();
+				}
+			}
+		});
 		renderer?.dispose();
 		composer?.dispose();
 	});
@@ -554,9 +567,9 @@
 					break;
 				}
 				case 'ConnectionDiscovered': {
-					const data = event.data as { source?: string; target?: string };
-					const srcPos = data.source ? nodePositions.get(data.source) : null;
-					const tgtPos = data.target ? nodePositions.get(data.target) : null;
+					const data = event.data as { source_id?: string; target_id?: string };
+					const srcPos = data.source_id ? nodePositions.get(data.source_id) : null;
+					const tgtPos = data.target_id ? nodePositions.get(data.target_id) : null;
 					if (srcPos && tgtPos) {
 						createConnectionFlash(srcPos, tgtPos, new THREE.Color(0xf59e0b));
 					}

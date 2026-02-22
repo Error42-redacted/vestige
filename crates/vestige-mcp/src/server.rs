@@ -604,7 +604,12 @@ impl McpServer {
             // ================================================================
             // MAINTENANCE TOOLS (v1.2+, non-deprecated)
             // ================================================================
-            "consolidate" => tools::maintenance::execute_consolidate(&self.storage, request.arguments).await,
+            "consolidate" => {
+                self.emit(VestigeEvent::ConsolidationStarted {
+                    timestamp: chrono::Utc::now(),
+                });
+                tools::maintenance::execute_consolidate(&self.storage, request.arguments).await
+            }
             "backup" => tools::maintenance::execute_backup(&self.storage, request.arguments).await,
             "export" => tools::maintenance::execute_export(&self.storage, request.arguments).await,
             "gc" => tools::maintenance::execute_gc(&self.storage, request.arguments).await,
@@ -618,7 +623,13 @@ impl McpServer {
             // ================================================================
             // COGNITIVE TOOLS (v1.5+)
             // ================================================================
-            "dream" => tools::dream::execute(&self.storage, &self.cognitive, request.arguments).await,
+            "dream" => {
+                self.emit(VestigeEvent::DreamStarted {
+                    memory_count: self.storage.get_stats().map(|s| s.total_nodes as usize).unwrap_or(0),
+                    timestamp: chrono::Utc::now(),
+                });
+                tools::dream::execute(&self.storage, &self.cognitive, request.arguments).await
+            }
             "explore_connections" => tools::explore::execute(&self.storage, &self.cognitive, request.arguments).await,
             "predict" => tools::predict::execute(&self.storage, &self.cognitive, request.arguments).await,
             "restore" => tools::restore::execute(&self.storage, request.arguments).await,

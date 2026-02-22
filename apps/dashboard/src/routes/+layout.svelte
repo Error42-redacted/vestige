@@ -37,7 +37,7 @@
 			}
 			// Single-key navigation shortcuts
 			const shortcutMap: Record<string, string> = {
-				g: '/', m: '/memories', t: '/timeline', f: '/feed',
+				g: '/graph', m: '/memories', t: '/timeline', f: '/feed',
 				e: '/explore', i: '/intentions', s: '/stats',
 			};
 			const target = shortcutMap[e.key.toLowerCase()];
@@ -55,7 +55,7 @@
 	});
 
 	const nav = [
-		{ href: '/', label: 'Graph', icon: '◎', shortcut: 'G' },
+		{ href: '/graph', label: 'Graph', icon: '◎', shortcut: 'G' },
 		{ href: '/memories', label: 'Memories', icon: '◈', shortcut: 'M' },
 		{ href: '/timeline', label: 'Timeline', icon: '◷', shortcut: 'T' },
 		{ href: '/feed', label: 'Feed', icon: '◉', shortcut: 'F' },
@@ -69,9 +69,8 @@
 	const mobileNav = nav.slice(0, 5);
 
 	function isActive(href: string, currentPath: string): boolean {
-		// Strip base prefix for comparison
 		const path = currentPath.startsWith(base) ? currentPath.slice(base.length) || '/' : currentPath;
-		if (href === '/') return path === '/' || path === '/graph';
+		if (href === '/graph') return path === '/' || path === '/graph';
 		return path.startsWith(href);
 	}
 
@@ -94,7 +93,7 @@
 	<!-- Desktop Sidebar (hidden on mobile) -->
 	<nav class="hidden md:flex w-16 lg:w-56 flex-shrink-0 bg-abyss border-r border-subtle/30 flex-col">
 		<!-- Logo -->
-		<a href="/" class="flex items-center gap-3 px-4 py-5 border-b border-subtle/20">
+		<a href="/graph" class="flex items-center gap-3 px-4 py-5 border-b border-subtle/20">
 			<div class="w-8 h-8 rounded-lg bg-gradient-to-br from-dream to-synapse flex items-center justify-center text-bright text-sm font-bold">
 				V
 			</div>

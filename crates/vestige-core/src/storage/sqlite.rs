@@ -3293,8 +3293,13 @@ impl Storage {
         let path_str = path.to_str().ok_or_else(|| {
             StorageError::Init("Invalid backup path encoding".to_string())
         })?;
+        // Validate path: reject control characters (except tab) for defense-in-depth
+        if path_str.bytes().any(|b| b < 0x20 && b != b'\t') {
+            return Err(StorageError::Init("Backup path contains invalid characters".to_string()));
+        }
         let reader = self.reader.lock()
             .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        // VACUUM INTO doesn't support parameterized queries; escape single quotes
         reader.execute_batch(&format!("VACUUM INTO '{}'", path_str.replace('\'', "''")))?;
         Ok(())
     }
