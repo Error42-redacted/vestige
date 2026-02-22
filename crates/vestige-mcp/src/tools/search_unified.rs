@@ -299,6 +299,19 @@ pub async fn execute(
         }
     }
 
+    // ====================================================================
+    // STAGE 5C: Utility-based ranking (MemRL-inspired)
+    // Memories that proved useful in past sessions get a retrieval boost.
+    // utility_score = times_useful / times_retrieved (0.0 to 1.0)
+    // ====================================================================
+    for result in &mut filtered_results {
+        let utility = result.node.utility_score.unwrap_or(0.0) as f32;
+        if utility > 0.0 {
+            // Utility boost: up to +15% for memories with utility_score = 1.0
+            result.combined_score *= 1.0 + (utility * 0.15);
+        }
+    }
+
     // Re-sort by adjusted combined_score (descending) after all score modifications
     filtered_results.sort_by(|a, b| {
         b.combined_score

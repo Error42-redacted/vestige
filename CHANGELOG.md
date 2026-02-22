@@ -5,6 +5,64 @@ All notable changes to Vestige will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-02-22 — "Cognitive Leap"
+
+The biggest release in Vestige history. A complete visual and cognitive overhaul.
+
+### Added
+
+#### 3D Memory Dashboard
+- **SvelteKit 2 + Three.js dashboard** — full 3D neural visualization at `localhost:3927/dashboard`
+- **7 interactive pages**: Graph (3D force-directed), Memories (browser), Timeline, Feed (real-time events), Explore (connections), Intentions, Stats
+- **WebSocket event bus** — `tokio::broadcast` channel with 16 event types (MemoryCreated, SearchPerformed, DreamStarted/Completed, ConsolidationStarted/Completed, RetentionDecayed, ConnectionDiscovered, ActivationSpread, ImportanceScored, Heartbeat, etc.)
+- **Real-time 3D animations** — memories pulse on access, burst particles on creation, shockwave rings on dreams, golden flash lines on connection discovery, fade on decay
+- **Bloom post-processing** — cinematic neural network aesthetic with UnrealBloomPass
+- **GPU instanced rendering** — 1000+ nodes at 60fps via Three.js InstancedMesh
+- **Text label sprites** — distance-based visibility (fade in <40 units, out >80 units), canvas-based rendering
+- **Dream visualization mode** — purple ambient, slow-motion orbit, sequential memory replay
+- **FSRS retention curves** — SVG `R(t) = e^(-t/S)` with prediction pills at 1d/7d/30d
+- **Command palette** — `Cmd+K` navigation with filtered search
+- **Keyboard shortcuts** — `G` Graph, `M` Memories, `T` Timeline, `F` Feed, `E` Explore, `I` Intentions, `S` Stats, `/` Search
+- **Responsive layout** — desktop sidebar + mobile bottom nav with safe-area-inset
+- **PWA support** — installable via `manifest.json`
+- **Single binary deployment** — SvelteKit build embedded via `include_dir!` macro
+
+#### Engine Upgrades
+- **HyDE query expansion** — template-based Hypothetical Document Embeddings: classify_intent (6 types) → expand_query (3-5 variants) → centroid_embedding. Wired into `semantic_search_raw`
+- **fastembed 5.11** — upgraded from 5.9, adds Nomic v2 MoE + Qwen3 reranker support
+- **Nomic Embed Text v2 MoE** — opt-in via `--features nomic-v2` (475M params, 305M active, 8 experts, Candle backend)
+- **Qwen3 Reranker** — opt-in via `--features qwen3-reranker` (Candle backend, high-precision cross-encoder)
+- **Metal GPU acceleration** — opt-in via `--features metal` (Apple Silicon, significantly faster embedding inference)
+
+#### Backend
+- **Axum WebSocket** — `/ws` endpoint with 5-second heartbeat, live stats (memory count, avg retention, uptime)
+- **7 new REST endpoints** — `POST /api/dream`, `/api/explore`, `/api/predict`, `/api/importance`, `/api/consolidate`, `GET /api/search`, `/api/retention-distribution`, `/api/intentions`
+- **Event emission from MCP tools** — `emit_tool_event()` broadcasts events for smart_ingest, search, dream, consolidate, memory, importance_score
+- **Shared broadcast channel** — single `tokio::broadcast::channel(1024)` shared between dashboard and MCP server
+- **CORS for SvelteKit dev** — `localhost:5173` allowed in dev mode
+
+#### Benchmarks
+- **Criterion benchmark suite** — `cosine_similarity` 296ns, `centroid` 1.3µs, HyDE expand 1.4µs, RRF fusion 17µs
+
+### Changed
+- Version: 1.8.0 → 2.0.0 (both crates)
+- Rust edition: 2024 (MSRV 1.85)
+- Tests: 651 → 734 (352 core + 378 mcp + 4 doctests)
+- Binary size: ~22MB (includes embedded SvelteKit dashboard)
+- CognitiveEngine moved from main.rs binary crate to lib.rs for dashboard access
+- Dashboard served at `/dashboard` prefix (legacy HTML kept at `/` and `/graph`)
+- `McpServer` now accepts optional `broadcast::Sender<VestigeEvent>` for event emission
+
+### Technical
+- `apps/dashboard/` — new SvelteKit app (Svelte 5, Tailwind CSS 4, Three.js 0.172, `@sveltejs/adapter-static`)
+- `dashboard/events.rs` — 16-variant `VestigeEvent` enum with `#[serde(tag = "type", content = "data")]`
+- `dashboard/websocket.rs` — WebSocket upgrade handler with heartbeat + event forwarding
+- `dashboard/static_files.rs` — `include_dir!` macro for embedded SvelteKit build
+- `search/hyde.rs` — HyDE module with intent classification and query expansion
+- `benches/search_bench.rs` — Criterion benchmarks for search pipeline components
+
+---
+
 ## [1.8.0] - 2026-02-21
 
 ### Added

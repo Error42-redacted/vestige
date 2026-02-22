@@ -81,6 +81,11 @@ pub fn schema() -> Value {
                         "source": {
                             "type": "string",
                             "description": "Source reference"
+                        },
+                        "forceCreate": {
+                            "type": "boolean",
+                            "description": "Force creation of this item even if similar content exists",
+                            "default": false
                         }
                     },
                     "required": ["content"]
@@ -111,6 +116,7 @@ struct BatchItem {
     #[serde(alias = "node_type")]
     node_type: Option<String>,
     source: Option<String>,
+    force_create: Option<bool>,
 }
 
 pub async fn execute(
@@ -125,7 +131,8 @@ pub async fn execute(
 
     // Detect mode: batch (items present) vs single (content present)
     if let Some(items) = args.items {
-        return execute_batch(storage, cognitive, items).await;
+        let global_force = args.force_create.unwrap_or(false);
+        return execute_batch(storage, cognitive, items, global_force).await;
     }
 
     // Single mode: content is required
@@ -275,6 +282,7 @@ async fn execute_batch(
     storage: &Arc<Storage>,
     cognitive: &Arc<Mutex<CognitiveEngine>>,
     items: Vec<BatchItem>,
+    global_force_create: bool,
 ) -> Result<Value, String> {
     if items.is_empty() {
         return Err("Items array cannot be empty".to_string());
@@ -311,6 +319,9 @@ async fn execute_batch(
             skipped += 1;
             continue;
         }
+
+        // Extract per-item force_create before consuming other fields
+        let item_force_create = item.force_create.unwrap_or(false);
 
         // ================================================================
         // COGNITIVE PRE-INGEST (per item)
@@ -351,6 +362,39 @@ async fn execute_batch(
         // ================================================================
         // INGEST (storage lock per item)
         // ================================================================
+
+        // Check force_create: global flag OR per-item flag
+        let item_force = global_force_create || item_force_create;
+        if item_force {
+            match storage.ingest(input) {
+                Ok(node) => {
+                    let node_id = node.id.clone();
+                    let node_content = node.content.clone();
+                    let node_type = node.node_type.clone();
+
+                    created += 1;
+                    run_post_ingest(cognitive, &node_id, &node_content, &node_type, importance_composite);
+
+                    results.push(serde_json::json!({
+                        "index": i,
+                        "status": "saved",
+                        "decision": "create",
+                        "nodeId": node_id,
+                        "importanceScore": importance_composite,
+                        "reason": "Forced creation - skipped similarity check"
+                    }));
+                }
+                Err(e) => {
+                    errors += 1;
+                    results.push(serde_json::json!({
+                        "index": i,
+                        "status": "error",
+                        "reason": e.to_string()
+                    }));
+                }
+            }
+            continue;
+        }
 
         #[cfg(all(feature = "embeddings", feature = "vector-search"))]
         {
@@ -861,6 +905,62 @@ mod tests {
         let value = result.unwrap();
         let results = value["results"].as_array().unwrap();
         assert!(results[0]["importanceScore"].is_number());
+    }
+
+    #[tokio::test]
+    async fn test_batch_force_create_global() {
+        let (storage, _dir) = test_storage().await;
+        // Three items with very similar content + global forceCreate
+        let result = execute(
+            &storage, &test_cognitive(),
+            Some(serde_json::json!({
+                "forceCreate": true,
+                "items": [
+                    { "content": "Physics question about quantum mechanics and wave functions" },
+                    { "content": "Physics question about quantum mechanics and wave equations" },
+                    { "content": "Physics question about quantum mechanics and wave behavior" }
+                ]
+            })),
+        ).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["mode"], "batch");
+        // All 3 should be created separately, not merged
+        assert_eq!(value["summary"]["created"], 3);
+        assert_eq!(value["summary"]["updated"], 0);
+        // Each result should say "Forced creation"
+        let results = value["results"].as_array().unwrap();
+        for r in results {
+            assert_eq!(r["decision"], "create");
+            assert!(r["reason"].as_str().unwrap().contains("Forced"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_force_create_per_item() {
+        let (storage, _dir) = test_storage().await;
+        // Mix of forced and non-forced items
+        let result = execute(
+            &storage, &test_cognitive(),
+            Some(serde_json::json!({
+                "items": [
+                    { "content": "Forced item one", "forceCreate": true },
+                    { "content": "Normal item two" },
+                    { "content": "Forced item three", "forceCreate": true }
+                ]
+            })),
+        ).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        let results = value["results"].as_array().unwrap();
+        // Forced items should say "Forced creation"
+        assert_eq!(results[0]["decision"], "create");
+        assert!(results[0]["reason"].as_str().unwrap().contains("Forced"));
+        // Non-forced item gets normal processing
+        assert_eq!(results[1]["status"], "saved");
+        // Third forced item
+        assert_eq!(results[2]["decision"], "create");
+        assert!(results[2]["reason"].as_str().unwrap().contains("Forced"));
     }
 
     #[tokio::test]

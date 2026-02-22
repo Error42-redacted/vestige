@@ -8,6 +8,7 @@
 //! - Reranking for precision (GOD TIER 2026)
 
 mod hybrid;
+pub mod hyde;
 mod keyword;
 mod reranker;
 mod temporal;
@@ -29,3 +30,6 @@ pub use reranker::{
     Reranker, RerankerConfig, RerankerError, RerankedResult,
     DEFAULT_RERANK_COUNT, DEFAULT_RETRIEVAL_COUNT,
 };
+
+// v2.0: HyDE-inspired query expansion for improved semantic search
+pub use hyde::{classify_intent, expand_query, centroid_embedding, QueryIntent};

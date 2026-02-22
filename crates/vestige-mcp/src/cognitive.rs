@@ -9,6 +9,7 @@ use vestige_core::{
     ActivationNetwork, SynapticTaggingSystem, HippocampalIndex, ContextMatcher,
     AccessibilityCalculator, CompetitionManager, StateUpdateService,
     ImportanceSignals, NoveltySignal, ArousalSignal, RewardSignal, AttentionSignal,
+    EmotionalMemory,
     // Advanced modules
     ImportanceTracker, ReconsolidationManager, IntentDetector, ActivityTracker,
     MemoryDreamer, MemoryChainBuilder, MemoryCompressor, CrossProjectLearner,
@@ -39,6 +40,7 @@ pub struct CognitiveEngine {
     pub arousal_signal: ArousalSignal,
     pub reward_signal: RewardSignal,
     pub attention_signal: AttentionSignal,
+    pub emotional_memory: EmotionalMemory,
     pub predictive_memory: PredictiveMemory,
     pub prospective_memory: ProspectiveMemory,
     pub intention_parser: IntentionParser,
@@ -84,6 +86,7 @@ impl CognitiveEngine {
             arousal_signal: ArousalSignal::new(),
             reward_signal: RewardSignal::new(),
             attention_signal: AttentionSignal::new(),
+            emotional_memory: EmotionalMemory::new(),
             predictive_memory: PredictiveMemory::new(),
             prospective_memory: ProspectiveMemory::new(),
             intention_parser: IntentionParser::new(),

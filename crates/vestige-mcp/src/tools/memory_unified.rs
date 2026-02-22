@@ -43,8 +43,8 @@ pub fn schema() -> Value {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["get", "delete", "state", "promote", "demote"],
-                "description": "Action to perform: 'get' retrieves full memory node, 'delete' removes memory, 'state' returns accessibility state, 'promote' increases retrieval strength (thumbs up), 'demote' decreases retrieval strength (thumbs down)"
+                "enum": ["get", "delete", "state", "promote", "demote", "edit"],
+                "description": "Action to perform: 'get' retrieves full memory node, 'delete' removes memory, 'state' returns accessibility state, 'promote' increases retrieval strength (thumbs up), 'demote' decreases retrieval strength (thumbs down), 'edit' updates content in-place (preserves FSRS state)"
             },
             "id": {
                 "type": "string",
@@ -53,6 +53,10 @@ pub fn schema() -> Value {
             "reason": {
                 "type": "string",
                 "description": "Why this memory is being promoted/demoted (optional, for logging). Only used with promote/demote actions."
+            },
+            "content": {
+                "type": "string",
+                "description": "New content for edit action. Replaces existing content, regenerates embedding, preserves FSRS state."
             }
         },
         "required": ["action", "id"]
@@ -65,6 +69,7 @@ struct MemoryArgs {
     action: String,
     id: String,
     reason: Option<String>,
+    content: Option<String>,
 }
 
 /// Execute the unified memory tool
@@ -87,8 +92,9 @@ pub async fn execute(
         "state" => execute_state(storage, &args.id).await,
         "promote" => execute_promote(storage, cognitive, &args.id, args.reason).await,
         "demote" => execute_demote(storage, cognitive, &args.id, args.reason).await,
+        "edit" => execute_edit(storage, &args.id, args.content).await,
         _ => Err(format!(
-            "Invalid action '{}'. Must be one of: get, delete, state, promote, demote",
+            "Invalid action '{}'. Must be one of: get, delete, state, promote, demote, edit",
             args.action
         )),
     }
@@ -302,6 +308,53 @@ async fn execute_demote(
     }))
 }
 
+/// Edit a memory's content in-place — preserves FSRS state, regenerates embedding
+async fn execute_edit(
+    storage: &Arc<Storage>,
+    id: &str,
+    content: Option<String>,
+) -> Result<Value, String> {
+    let new_content = content.ok_or("Missing 'content' field. Required for edit action.")?;
+
+    if new_content.trim().is_empty() {
+        return Err("Content cannot be empty".to_string());
+    }
+
+    // Get existing node to capture old content
+    let old_node = storage
+        .get_node(id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Memory not found: {}", id))?;
+
+    // Update content (regenerates embedding, syncs FTS5)
+    storage
+        .update_node_content(id, &new_content)
+        .map_err(|e| e.to_string())?;
+
+    // Truncate previews for response (char-safe to avoid UTF-8 panics)
+    let old_preview = if old_node.content.chars().count() > 200 {
+        let truncated: String = old_node.content.chars().take(197).collect();
+        format!("{}...", truncated)
+    } else {
+        old_node.content.clone()
+    };
+    let new_preview = if new_content.chars().count() > 200 {
+        let truncated: String = new_content.chars().take(197).collect();
+        format!("{}...", truncated)
+    } else {
+        new_content.clone()
+    };
+
+    Ok(serde_json::json!({
+        "success": true,
+        "action": "edit",
+        "nodeId": id,
+        "oldContentPreview": old_preview,
+        "newContentPreview": new_preview,
+        "note": "FSRS state preserved (stability, difficulty, reps, lapses unchanged). Embedding regenerated for new content."
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,9 +389,10 @@ mod tests {
         assert!(schema["properties"]["id"].is_object());
         assert!(schema["properties"]["reason"].is_object());
         assert_eq!(schema["required"], serde_json::json!(["action", "id"]));
-        // Verify all 5 actions are in enum
+        // Verify all 6 actions are in enum
         let actions = schema["properties"]["action"]["enum"].as_array().unwrap();
-        assert_eq!(actions.len(), 5);
+        assert_eq!(actions.len(), 6);
+        assert!(actions.contains(&serde_json::json!("edit")));
         assert!(actions.contains(&serde_json::json!("promote")));
         assert!(actions.contains(&serde_json::json!("demote")));
     }
@@ -440,6 +494,13 @@ mod tests {
     #[tokio::test]
     async fn test_delete_nonexistent_memory() {
         let (storage, _dir) = test_storage().await;
+        // Ingest+delete a throwaway memory to warm writer after WAL migration
+        let warmup_id = storage.ingest(vestige_core::IngestInput {
+            content: "warmup".to_string(),
+            node_type: "fact".to_string(),
+            ..Default::default()
+        }).unwrap().id;
+        let _ = storage.delete_node(&warmup_id);
         let args = serde_json::json!({ "action": "delete", "id": "00000000-0000-0000-0000-000000000000" });
         let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_ok());
@@ -612,5 +673,108 @@ mod tests {
         assert_eq!(value["changes"]["retrievalStrength"]["delta"], "-0.30");
         assert_eq!(value["changes"]["retentionStrength"]["delta"], "-0.15");
         assert_eq!(value["changes"]["stability"]["multiplier"], "0.5x");
+    }
+
+    // ========================================================================
+    // EDIT TESTS (v1.9.2)
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_edit_succeeds() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+        let args = serde_json::json!({
+            "action": "edit",
+            "id": id,
+            "content": "Updated memory content"
+        });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["success"], true);
+        assert_eq!(value["action"], "edit");
+        assert_eq!(value["nodeId"], id);
+        assert!(value["oldContentPreview"].as_str().unwrap().contains("Memory unified test content"));
+        assert!(value["newContentPreview"].as_str().unwrap().contains("Updated memory content"));
+        assert!(value["note"].as_str().unwrap().contains("FSRS state preserved"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_preserves_fsrs_state() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+
+        // Get FSRS state before edit
+        let before = storage.get_node(&id).unwrap().unwrap();
+
+        // Edit content
+        let args = serde_json::json!({
+            "action": "edit",
+            "id": id,
+            "content": "Completely new content after edit"
+        });
+        execute(&storage, &test_cognitive(), Some(args)).await.unwrap();
+
+        // Verify FSRS state preserved
+        let after = storage.get_node(&id).unwrap().unwrap();
+        assert_eq!(after.stability, before.stability);
+        assert_eq!(after.difficulty, before.difficulty);
+        assert_eq!(after.reps, before.reps);
+        assert_eq!(after.lapses, before.lapses);
+        assert_eq!(after.retention_strength, before.retention_strength);
+        // Content should be updated
+        assert_eq!(after.content, "Completely new content after edit");
+        assert_ne!(after.content, before.content);
+    }
+
+    #[tokio::test]
+    async fn test_edit_missing_content_fails() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+        let args = serde_json::json!({ "action": "edit", "id": id });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("content"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_empty_content_fails() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+        let args = serde_json::json!({ "action": "edit", "id": id, "content": "  " });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_nonexistent_memory_fails() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({
+            "action": "edit",
+            "id": "00000000-0000-0000-0000-000000000000",
+            "content": "New content"
+        });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_with_multibyte_utf8_content() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+        // Content with emoji and CJK characters (multi-byte UTF-8)
+        let long_content = "🧠".repeat(100); // 100 brain emoji = 400 bytes but only 100 chars
+        let args = serde_json::json!({
+            "action": "edit",
+            "id": id,
+            "content": long_content
+        });
+        // This must NOT panic (previous code would panic on byte-level truncation)
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert_eq!(value["success"], true);
     }
 }

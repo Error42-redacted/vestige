@@ -58,6 +58,7 @@
 //!   processing. Psychological Review.
 
 pub mod context_memory;
+pub mod emotional_memory;
 pub mod hippocampal_index;
 pub mod importance_signals;
 pub mod memory_states;
@@ -241,4 +242,9 @@ pub use prospective_memory::{
 pub use spreading_activation::{
     ActivatedMemory, ActivationConfig, ActivationNetwork, ActivationNode, AssociatedMemory,
     AssociationEdge, LinkType,
+};
+
+// Emotional memory (Brown & Kulik 1977, Bower 1981, LaBar & Cabeza 2006)
+pub use emotional_memory::{
+    EmotionCategory, EmotionalEvaluation, EmotionalMemory, EmotionalMemoryStats,
 };

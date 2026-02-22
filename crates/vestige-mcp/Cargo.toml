@@ -1,8 +1,8 @@
 [package]
 name = "vestige-mcp"
-version = "1.9.1"
+version = "2.0.0"
 edition = "2024"
-description = "Cognitive memory MCP server for Claude - FSRS-6, spreading activation, synaptic tagging, and 130 years of memory research"
+description = "Cognitive memory MCP server for Claude - FSRS-6, spreading activation, synaptic tagging, 3D dashboard, and 130 years of memory research"
 authors = ["samvallad33"]
 license = "AGPL-3.0-only"
 keywords = ["mcp", "ai", "memory", "fsrs", "neuroscience", "cognitive-science", "spaced-repetition"]
@@ -32,7 +32,7 @@ path = "src/bin/cli.rs"
 # ============================================================================
 # Includes: FSRS-6, spreading activation, synaptic tagging, hippocampal indexing,
 # memory states, context memory, importance signals, dreams, and more
-vestige-core = { version = "1.0.0", path = "../vestige-core" }
+vestige-core = { version = "2.0.0", path = "../vestige-core" }
 
 # ============================================================================
 # MCP Server Dependencies
@@ -72,10 +72,15 @@ colored = "3"
 rusqlite = { version = "0.38", features = ["bundled"] }
 
 # Dashboard (v1.2) - hyper/tower already in Cargo.lock via rmcp/reqwest
-axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio", "http1"] }
+axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio", "http1", "ws"] }
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.6", features = ["cors", "set-header"] }
+futures-util = "0.3"
 open = "5"
+
+# Embedded SvelteKit dashboard (v2.0)
+include_dir = "0.7"
+mime_guess = "2"
 
 [dev-dependencies]
 tempfile = "3"

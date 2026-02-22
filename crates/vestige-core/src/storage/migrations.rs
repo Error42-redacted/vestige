@@ -44,6 +44,11 @@ pub const MIGRATIONS: &[Migration] = &[
         description: "v1.9.0 Autonomic: waking SWR tags, utility scoring, retention tracking",
         up: MIGRATION_V8_UP,
     },
+    Migration {
+        version: 9,
+        description: "v2.0.0 Cognitive Leap: emotional memory, flashbulb encoding, temporal hierarchy",
+        up: MIGRATION_V9_UP,
+    },
 ];
 
 /// A database migration
@@ -547,6 +552,57 @@ CREATE TABLE IF NOT EXISTS retention_snapshots (
 CREATE INDEX IF NOT EXISTS idx_retention_snapshots_at ON retention_snapshots(snapshot_at);
 
 UPDATE schema_version SET version = 8, applied_at = datetime('now');
+"#;
+
+/// V9: v2.0.0 Cognitive Leap — Emotional Memory, Flashbulb Encoding, Temporal Hierarchy
+///
+/// Adds columns for:
+/// - Emotional memory module (#29): valence scoring + flashbulb encoding (Brown & Kulik 1977)
+/// - Temporal Memory Tree: hierarchical summaries (daily/weekly/monthly) for TiMem-style recall
+/// - Dream phase tracking: per-phase metrics for 4-phase biologically-accurate dream cycles
+const MIGRATION_V9_UP: &str = r#"
+-- ============================================================================
+-- EMOTIONAL MEMORY (Brown & Kulik 1977, LaBar & Cabeza 2006)
+-- ============================================================================
+
+-- Emotional valence: -1.0 (very negative) to 1.0 (very positive)
+-- Used for mood-congruent retrieval and emotional decay modulation
+ALTER TABLE knowledge_nodes ADD COLUMN emotional_valence REAL DEFAULT 0.0;
+
+-- Flashbulb memory flag: ultra-high-fidelity encoding for high-importance + high-arousal events
+-- Flashbulb memories get minimum decay rate and maximum context capture
+ALTER TABLE knowledge_nodes ADD COLUMN flashbulb BOOLEAN DEFAULT FALSE;
+
+CREATE INDEX IF NOT EXISTS idx_nodes_flashbulb ON knowledge_nodes(flashbulb);
+
+-- ============================================================================
+-- TEMPORAL MEMORY TREE (TiMem-inspired hierarchical consolidation)
+-- ============================================================================
+
+-- Temporal hierarchy level for summary nodes produced during dream consolidation
+-- NULL = leaf node (raw memory), 'daily'/'weekly'/'monthly' = summary at that level
+ALTER TABLE knowledge_nodes ADD COLUMN temporal_level TEXT;
+
+-- Parent summary ID: links a leaf memory to its containing summary
+ALTER TABLE knowledge_nodes ADD COLUMN summary_parent_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_nodes_temporal_level ON knowledge_nodes(temporal_level);
+CREATE INDEX IF NOT EXISTS idx_nodes_summary_parent ON knowledge_nodes(summary_parent_id);
+
+-- ============================================================================
+-- 4-PHASE DREAM CYCLE TRACKING (NREM1 → NREM3 → REM → Integration)
+-- ============================================================================
+
+-- Extended dream history with per-phase metrics
+ALTER TABLE dream_history ADD COLUMN phase_nrem1_ms INTEGER DEFAULT 0;
+ALTER TABLE dream_history ADD COLUMN phase_nrem3_ms INTEGER DEFAULT 0;
+ALTER TABLE dream_history ADD COLUMN phase_rem_ms INTEGER DEFAULT 0;
+ALTER TABLE dream_history ADD COLUMN phase_integration_ms INTEGER DEFAULT 0;
+ALTER TABLE dream_history ADD COLUMN summaries_generated INTEGER DEFAULT 0;
+ALTER TABLE dream_history ADD COLUMN emotional_memories_processed INTEGER DEFAULT 0;
+ALTER TABLE dream_history ADD COLUMN creative_connections_found INTEGER DEFAULT 0;
+
+UPDATE schema_version SET version = 9, applied_at = datetime('now');
 "#;
 
 /// Get current schema version from database

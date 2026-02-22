@@ -144,6 +144,11 @@ pub use storage::{
 
 // Consolidation (sleep-inspired memory processing)
 pub use consolidation::SleepConsolidation;
+pub use consolidation::{
+    DreamEngine, DreamPhase, FourPhaseDreamResult, PhaseResult,
+    TriagedMemory, TriageCategory, CreativeConnection, CreativeConnectionType,
+    DreamInsight,
+};
 
 // Advanced features (bleeding edge 2026)
 pub use advanced::{
@@ -369,6 +374,11 @@ pub use neuroscience::{
     TimeOfDay,
     TopicalContext,
     INDEX_EMBEDDING_DIM,
+    // Emotional Memory (Brown & Kulik 1977, Bower 1981, LaBar & Cabeza 2006)
+    EmotionCategory,
+    EmotionalEvaluation,
+    EmotionalMemory,
+    EmotionalMemoryStats,
 };
 
 // Embeddings (when feature enabled)

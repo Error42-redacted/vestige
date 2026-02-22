@@ -27,7 +27,8 @@
 //! - Reconsolidation (memories editable on retrieval)
 //! - Memory Chains (reasoning paths)
 
-pub mod cognitive;
+// cognitive is exported from lib.rs for dashboard access
+use vestige_mcp::cognitive;
 mod protocol;
 mod resources;
 mod server;
@@ -221,23 +222,38 @@ async fn main() {
         });
     }
 
-    // Spawn dashboard HTTP server alongside MCP server
+    // Create cognitive engine (stateful neuroscience modules)
+    let cognitive = Arc::new(Mutex::new(cognitive::CognitiveEngine::new()));
+    info!("CognitiveEngine initialized (28 modules)");
+
+    // Create shared event broadcast channel for dashboard <-> MCP tool events
+    let (event_tx, _) = tokio::sync::broadcast::channel::<vestige_mcp::dashboard::events::VestigeEvent>(1024);
+
+    // Spawn dashboard HTTP server alongside MCP server (now with CognitiveEngine access)
     {
         let dashboard_port = std::env::var("VESTIGE_DASHBOARD_PORT")
             .ok()
             .and_then(|s| s.parse::<u16>().ok())
             .unwrap_or(3927);
         let dashboard_storage = Arc::clone(&storage);
+        let dashboard_cognitive = Arc::clone(&cognitive);
+        let dashboard_event_tx = event_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = vestige_mcp::dashboard::start_background(dashboard_storage, dashboard_port).await {
-                warn!("Dashboard failed to start: {}", e);
+            match vestige_mcp::dashboard::start_background_with_event_tx(
+                dashboard_storage,
+                Some(dashboard_cognitive),
+                dashboard_event_tx,
+                dashboard_port,
+            ).await {
+                Ok(_state) => {
+                    info!("Dashboard started with WebSocket + CognitiveEngine + shared event bus");
+                }
+                Err(e) => {
+                    warn!("Dashboard failed to start: {}", e);
+                }
             }
         });
     }
-
-    // Create cognitive engine (stateful neuroscience modules)
-    let cognitive = Arc::new(Mutex::new(cognitive::CognitiveEngine::new()));
-    info!("CognitiveEngine initialized (26 modules)");
 
     // Load cross-encoder reranker in the background (downloads ~150MB on first run)
     #[cfg(feature = "embeddings")]
@@ -251,8 +267,8 @@ async fn main() {
         });
     }
 
-    // Create MCP server
-    let server = McpServer::new(storage, cognitive);
+    // Create MCP server with shared event channel for dashboard broadcasts
+    let server = McpServer::new_with_events(storage, cognitive, event_tx);
 
     // Create stdio transport
     let transport = StdioTransport::new();

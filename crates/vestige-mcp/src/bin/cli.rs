@@ -961,7 +961,7 @@ fn run_dashboard(port: u16, open_browser: bool) -> anyhow::Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
-        vestige_mcp::dashboard::start_dashboard(storage, port, open_browser)
+        vestige_mcp::dashboard::start_dashboard(storage, None, port, open_browser)
             .await
             .map_err(|e| anyhow::anyhow!("Dashboard error: {}", e))
     })

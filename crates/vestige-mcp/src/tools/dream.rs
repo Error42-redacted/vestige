@@ -139,6 +139,13 @@ pub async fn execute(
             insights_generated: dream_result.insights_generated.len() as i32,
             memories_strengthened: dream_result.memories_strengthened as i32,
             memories_compressed: dream_result.memories_compressed as i32,
+            phase_nrem1_ms: None,
+            phase_nrem3_ms: None,
+            phase_rem_ms: None,
+            phase_integration_ms: None,
+            summaries_generated: None,
+            emotional_memories_processed: None,
+            creative_connections_found: None,
         };
         if let Err(e) = storage.save_dream_history(&record) {
             tracing::warn!("Failed to persist dream history: {}", e);

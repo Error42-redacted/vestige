@@ -1,0 +1,100 @@
+@import 'tailwindcss';
+
+@theme {
+	/* Vestige cosmic dark palette */
+	--color-void: #050510;
+	--color-abyss: #0a0a1a;
+	--color-deep: #10102a;
+	--color-surface: #161638;
+	--color-elevated: #1e1e4a;
+	--color-subtle: #2a2a5e;
+	--color-muted: #4a4a7a;
+	--color-dim: #7a7aaa;
+	--color-text: #e0e0ff;
+	--color-bright: #ffffff;
+
+	/* Accent colors */
+	--color-synapse: #6366f1;
+	--color-synapse-glow: #818cf8;
+	--color-dream: #a855f7;
+	--color-dream-glow: #c084fc;
+	--color-memory: #3b82f6;
+	--color-recall: #10b981;
+	--color-decay: #ef4444;
+	--color-warning: #f59e0b;
+
+	/* Node type colors */
+	--color-node-fact: #3b82f6;
+	--color-node-concept: #8b5cf6;
+	--color-node-event: #f59e0b;
+	--color-node-person: #10b981;
+	--color-node-place: #06b6d4;
+	--color-node-note: #6b7280;
+	--color-node-pattern: #ec4899;
+	--color-node-decision: #ef4444;
+
+	--font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+}
+
+/* Base styles */
+html {
+	background: var(--color-void);
+	color: var(--color-text);
+	font-family: var(--font-mono);
+}
+
+body {
+	margin: 0;
+	min-height: 100vh;
+	overflow: hidden;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+	width: 6px;
+	height: 6px;
+}
+::-webkit-scrollbar-track {
+	background: var(--color-abyss);
+}
+::-webkit-scrollbar-thumb {
+	background: var(--color-subtle);
+	border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+	background: var(--color-muted);
+}
+
+/* Glow effects */
+.glow-synapse {
+	box-shadow: 0 0 20px rgba(99, 102, 241, 0.3), 0 0 60px rgba(99, 102, 241, 0.1);
+}
+.glow-dream {
+	box-shadow: 0 0 20px rgba(168, 85, 247, 0.3), 0 0 60px rgba(168, 85, 247, 0.1);
+}
+.glow-memory {
+	box-shadow: 0 0 20px rgba(59, 130, 246, 0.3), 0 0 60px rgba(59, 130, 246, 0.1);
+}
+
+/* Pulse animation for live indicators */
+@keyframes pulse-glow {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.5; }
+}
+.animate-pulse-glow {
+	animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* Neural particle animation */
+@keyframes float {
+	0%, 100% { transform: translateY(0) translateX(0); }
+	25% { transform: translateY(-10px) translateX(5px); }
+	50% { transform: translateY(-5px) translateX(-5px); }
+	75% { transform: translateY(-15px) translateX(3px); }
+}
+
+/* Retention bar colors */
+.retention-critical { color: var(--color-decay); }
+.retention-low { color: var(--color-warning); }
+.retention-good { color: var(--color-recall); }
+.retention-strong { color: var(--color-synapse); }

@@ -1,15 +1,12 @@
 //! Local Semantic Embeddings
 //!
-//! Uses fastembed v5 for local ONNX-based embedding generation.
-//! Default model: Nomic Embed Text v1.5 (768 dimensions, Matryoshka support)
+//! Uses fastembed v5.11 for local inference.
 //!
-//! ## 2026 GOD TIER UPGRADE
+//! ## Models
 //!
-//! Upgraded to nomic-embed-text-v1.5:
-//! - 768 dimensions with Matryoshka representation learning
-//! - 8192 token context window (vs 512 for most models)
-//! - State-of-the-art MTEB benchmark performance
-//! - Fully open source with training data released
+//! - **Default**: Nomic Embed Text v1.5 (ONNX, 768d → 256d Matryoshka, 8192 context)
+//! - **Optional**: Nomic Embed Text v2 MoE (Candle, 475M params, 305M active, 8 experts)
+//!   Enable with `nomic-v2` feature flag + `metal` for Apple Silicon acceleration.
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use std::sync::{Mutex, OnceLock};
@@ -242,7 +239,10 @@ impl EmbeddingService {
 
     /// Get the model name
     pub fn model_name(&self) -> &'static str {
-        "nomic-ai/nomic-embed-text-v1.5"
+        #[cfg(feature = "nomic-v2")]
+        { "nomic-ai/nomic-embed-text-v2-moe" }
+        #[cfg(not(feature = "nomic-v2"))]
+        { "nomic-ai/nomic-embed-text-v1.5" }
     }
 
     /// Get the embedding dimensions

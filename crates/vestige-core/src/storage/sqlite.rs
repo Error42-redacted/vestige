@@ -27,6 +27,9 @@ use crate::embeddings::{matryoshka_truncate, Embedding, EmbeddingService, EMBEDD
 #[cfg(feature = "vector-search")]
 use crate::search::{linear_combination, VectorIndex};
 
+#[cfg(all(feature = "embeddings", feature = "vector-search"))]
+use crate::search::hyde;
+
 // ============================================================================
 // ERROR TYPES
 // ============================================================================
@@ -718,6 +721,13 @@ impl Storage {
             valid_until,
             has_embedding: has_embedding.map(|v| v == 1),
             embedding_model,
+            // v2.0 fields
+            utility_score: row.get("utility_score").ok(),
+            times_retrieved: row.get("times_retrieved").ok(),
+            times_useful: row.get("times_useful").ok(),
+            emotional_valence: row.get("emotional_valence").ok(),
+            flashbulb: row.get::<_, Option<bool>>("flashbulb").ok().flatten(),
+            temporal_level: row.get::<_, Option<String>>("temporal_level").ok().flatten(),
         })
     }
 
@@ -884,7 +894,13 @@ impl Storage {
                 "UPDATE knowledge_nodes SET
                     last_accessed = ?1,
                     retrieval_strength = MIN(1.0, retrieval_strength + 0.05),
-                    retention_strength = MIN(1.0, retention_strength + 0.02)
+                    retention_strength = MIN(1.0, retention_strength + 0.02),
+                    times_retrieved = COALESCE(times_retrieved, 0) + 1,
+                    utility_score = CASE
+                        WHEN COALESCE(times_retrieved, 0) + 1 > 0
+                        THEN CAST(COALESCE(times_useful, 0) AS REAL) / (COALESCE(times_retrieved, 0) + 1)
+                        ELSE 0.0
+                    END
                 WHERE id = ?2",
                 params![now.to_rfc3339(), id],
             )?;
@@ -936,6 +952,27 @@ impl Storage {
         for id in ids {
             self.strengthen_on_access(id)?;
         }
+        Ok(())
+    }
+
+    /// Mark a memory as "useful" — called when a retrieved memory is subsequently
+    /// referenced in a save or decision (MemRL-inspired utility tracking).
+    ///
+    /// Increments `times_useful` and recomputes `utility_score = times_useful / times_retrieved`.
+    pub fn mark_memory_useful(&self, id: &str) -> Result<()> {
+        let writer = self.writer.lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        writer.execute(
+            "UPDATE knowledge_nodes SET
+                times_useful = COALESCE(times_useful, 0) + 1,
+                utility_score = CASE
+                    WHEN COALESCE(times_retrieved, 0) > 0
+                    THEN MIN(1.0, CAST(COALESCE(times_useful, 0) + 1 AS REAL) / COALESCE(times_retrieved, 0))
+                    ELSE 1.0
+                END
+            WHERE id = ?1",
+            params![id],
+        )?;
         Ok(())
     }
 
@@ -1465,7 +1502,27 @@ impl Storage {
             return Ok(vec![]);
         }
 
-        let query_embedding = self.get_query_embedding(query)?;
+        // HyDE query expansion: for conceptual queries, embed expanded variants
+        // and use the centroid for broader semantic coverage
+        let intent = hyde::classify_intent(query);
+        let query_embedding = match intent {
+            hyde::QueryIntent::Definition
+            | hyde::QueryIntent::HowTo
+            | hyde::QueryIntent::Reasoning
+            | hyde::QueryIntent::Lookup => {
+                let variants = hyde::expand_query(query);
+                let embeddings: Vec<Vec<f32>> = variants
+                    .iter()
+                    .filter_map(|v| self.get_query_embedding(v).ok())
+                    .collect();
+                if embeddings.len() > 1 {
+                    hyde::centroid_embedding(&embeddings)
+                } else {
+                    self.get_query_embedding(query)?
+                }
+            }
+            _ => self.get_query_embedding(query)?,
+        };
 
         let index = self
             .vector_index
@@ -2499,6 +2556,14 @@ pub struct DreamHistoryRecord {
     pub insights_generated: i32,
     pub memories_strengthened: i32,
     pub memories_compressed: i32,
+    // v2.0: 4-Phase dream cycle metrics
+    pub phase_nrem1_ms: Option<i64>,
+    pub phase_nrem3_ms: Option<i64>,
+    pub phase_rem_ms: Option<i64>,
+    pub phase_integration_ms: Option<i64>,
+    pub summaries_generated: Option<i32>,
+    pub emotional_memories_processed: Option<i32>,
+    pub creative_connections_found: Option<i32>,
 }
 
 impl Storage {
@@ -3108,8 +3173,10 @@ impl Storage {
         writer.execute(
             "INSERT INTO dream_history (
                 dreamed_at, duration_ms, memories_replayed, connections_found,
-                insights_generated, memories_strengthened, memories_compressed
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                insights_generated, memories_strengthened, memories_compressed,
+                phase_nrem1_ms, phase_nrem3_ms, phase_rem_ms, phase_integration_ms,
+                summaries_generated, emotional_memories_processed, creative_connections_found
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 record.dreamed_at.to_rfc3339(),
                 record.duration_ms,
@@ -3118,6 +3185,13 @@ impl Storage {
                 record.insights_generated,
                 record.memories_strengthened,
                 record.memories_compressed,
+                record.phase_nrem1_ms,
+                record.phase_nrem3_ms,
+                record.phase_rem_ms,
+                record.phase_integration_ms,
+                record.summaries_generated,
+                record.emotional_memories_processed,
+                record.creative_connections_found,
             ],
         )?;
         Ok(writer.last_insert_rowid())
@@ -3418,31 +3492,6 @@ impl Storage {
         Ok(result)
     }
 
-    /// Increment times_retrieved for a memory (for utility scoring)
-    pub fn increment_times_retrieved(&self, memory_id: &str) -> Result<()> {
-        let writer = self.writer.lock()
-            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
-        writer.execute(
-            "UPDATE knowledge_nodes SET times_retrieved = COALESCE(times_retrieved, 0) + 1 WHERE id = ?1",
-            params![memory_id],
-        )?;
-        Ok(())
-    }
-
-    /// Mark a memory as useful (retrieved AND subsequently referenced in a save)
-    pub fn mark_memory_useful(&self, memory_id: &str) -> Result<()> {
-        let writer = self.writer.lock()
-            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
-        writer.execute(
-            "UPDATE knowledge_nodes SET
-                times_useful = COALESCE(times_useful, 0) + 1,
-                utility_score = MIN(1.0, CAST(COALESCE(times_useful, 0) + 1 AS REAL) / MAX(COALESCE(times_retrieved, 0) + 1, 1))
-            WHERE id = ?1",
-            params![memory_id],
-        )?;
-        Ok(())
-    }
-
     /// Get memories with their connection data for graph visualization
     pub fn get_memory_subgraph(&self, center_id: &str, depth: u32, max_nodes: usize) -> Result<(Vec<KnowledgeNode>, Vec<ConnectionRecord>)> {
         let mut visited_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -3627,6 +3676,13 @@ mod tests {
             insights_generated: 3,
             memories_strengthened: 8,
             memories_compressed: 2,
+            phase_nrem1_ms: None,
+            phase_nrem3_ms: None,
+            phase_rem_ms: None,
+            phase_integration_ms: None,
+            summaries_generated: None,
+            emotional_memories_processed: None,
+            creative_connections_found: None,
         };
 
         let id = storage.save_dream_history(&record).unwrap();

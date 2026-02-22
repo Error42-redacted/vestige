@@ -1,0 +1,140 @@
+<script lang="ts">
+	import { onMount } from 'svelte';
+	import { api } from '$stores/api';
+	import type { Memory } from '$types';
+	import { NODE_TYPE_COLORS } from '$types';
+
+	let memories: Memory[] = $state([]);
+	let searchQuery = $state('');
+	let selectedType = $state('');
+	let selectedTag = $state('');
+	let minRetention = $state(0);
+	let loading = $state(true);
+	let selectedMemory: Memory | null = $state(null);
+	let debounceTimer: ReturnType<typeof setTimeout>;
+
+	onMount(() => loadMemories());
+
+	async function loadMemories() {
+		loading = true;
+		try {
+			const params: Record<string, string> = {};
+			if (searchQuery) params.q = searchQuery;
+			if (selectedType) params.node_type = selectedType;
+			if (selectedTag) params.tag = selectedTag;
+			if (minRetention > 0) params.min_retention = String(minRetention);
+			const res = await api.memories.list(params);
+			memories = res.memories;
+		} catch {
+			memories = [];
+		} finally {
+			loading = false;
+		}
+	}
+
+	function onSearch() {
+		clearTimeout(debounceTimer);
+		debounceTimer = setTimeout(loadMemories, 300);
+	}
+
+	function retentionColor(r: number): string {
+		if (r > 0.7) return '#10b981';
+		if (r > 0.4) return '#f59e0b';
+		return '#ef4444';
+	}
+</script>
+
+<div class="p-6 max-w-6xl mx-auto space-y-6">
+	<div class="flex items-center justify-between">
+		<h1 class="text-xl text-bright font-semibold">Memories</h1>
+		<span class="text-dim text-sm">{memories.length} results</span>
+	</div>
+
+	<!-- Search & Filters -->
+	<div class="flex gap-3 flex-wrap">
+		<input
+			type="text"
+			placeholder="Search memories..."
+			bind:value={searchQuery}
+			oninput={onSearch}
+			class="flex-1 min-w-64 px-4 py-2.5 bg-surface border border-subtle/40 rounded-lg text-text text-sm
+				placeholder:text-muted focus:outline-none focus:border-synapse/60 focus:ring-1 focus:ring-synapse/30 transition"
+		/>
+		<select bind:value={selectedType} onchange={loadMemories}
+			class="px-3 py-2.5 bg-surface border border-subtle/40 rounded-lg text-dim text-sm focus:outline-none">
+			<option value="">All types</option>
+			<option value="fact">Fact</option>
+			<option value="concept">Concept</option>
+			<option value="event">Event</option>
+			<option value="person">Person</option>
+			<option value="place">Place</option>
+			<option value="note">Note</option>
+			<option value="pattern">Pattern</option>
+			<option value="decision">Decision</option>
+		</select>
+		<div class="flex items-center gap-2 text-xs text-dim">
+			<span>Min retention:</span>
+			<input type="range" min="0" max="1" step="0.1" bind:value={minRetention} onchange={loadMemories}
+				class="w-24 accent-synapse" />
+			<span>{(minRetention * 100).toFixed(0)}%</span>
+		</div>
+	</div>
+
+	<!-- Memory grid -->
+	{#if loading}
+		<div class="grid gap-3">
+			{#each Array(8) as _}
+				<div class="h-24 bg-surface/50 rounded-lg animate-pulse"></div>
+			{/each}
+		</div>
+	{:else}
+		<div class="grid gap-3">
+			{#each memories as memory (memory.id)}
+				<button
+					onclick={() => selectedMemory = selectedMemory?.id === memory.id ? null : memory}
+					class="text-left p-4 bg-surface/50 border border-subtle/20 rounded-lg hover:border-synapse/30
+						hover:bg-surface transition-all duration-200 group
+						{selectedMemory?.id === memory.id ? 'border-synapse/50 glow-synapse' : ''}"
+				>
+					<div class="flex items-start justify-between gap-4">
+						<div class="flex-1 min-w-0">
+							<div class="flex items-center gap-2 mb-2">
+								<span class="w-2 h-2 rounded-full" style="background: {NODE_TYPE_COLORS[memory.nodeType] || '#6b7280'}"></span>
+								<span class="text-xs text-dim">{memory.nodeType}</span>
+								{#each memory.tags.slice(0, 3) as tag}
+									<span class="text-xs px-1.5 py-0.5 bg-deep rounded text-muted">{tag}</span>
+								{/each}
+							</div>
+							<p class="text-sm text-text leading-relaxed line-clamp-2">{memory.content}</p>
+						</div>
+						<div class="flex flex-col items-end gap-1 flex-shrink-0">
+							<div class="w-12 h-1.5 bg-deep rounded-full overflow-hidden">
+								<div class="h-full rounded-full" style="width: {memory.retentionStrength * 100}%; background: {retentionColor(memory.retentionStrength)}"></div>
+							</div>
+							<span class="text-xs text-muted">{(memory.retentionStrength * 100).toFixed(0)}%</span>
+						</div>
+					</div>
+
+					{#if selectedMemory?.id === memory.id}
+						<div class="mt-4 pt-4 border-t border-subtle/20 space-y-3">
+							<p class="text-sm text-text whitespace-pre-wrap">{memory.content}</p>
+							<div class="grid grid-cols-3 gap-3 text-xs text-dim">
+								<div>Storage: {(memory.storageStrength * 100).toFixed(1)}%</div>
+								<div>Retrieval: {(memory.retrievalStrength * 100).toFixed(1)}%</div>
+								<div>Created: {new Date(memory.createdAt).toLocaleDateString()}</div>
+							</div>
+							<div class="flex gap-2">
+								<button onclick={(e) => { e.stopPropagation(); api.memories.promote(memory.id); }}
+									class="px-3 py-1.5 bg-recall/20 text-recall text-xs rounded hover:bg-recall/30">Promote</button>
+								<button onclick={(e) => { e.stopPropagation(); api.memories.demote(memory.id); }}
+									class="px-3 py-1.5 bg-decay/20 text-decay text-xs rounded hover:bg-decay/30">Demote</button>
+								<button onclick={(e) => { e.stopPropagation(); api.memories.delete(memory.id); loadMemories(); }}
+									class="px-3 py-1.5 bg-decay/10 text-decay/60 text-xs rounded hover:bg-decay/20 ml-auto">Delete</button>
+							</div>
+						</div>
+					{/if}
+				</button>
+			{/each}
+		</div>
+	{/if}
+</div>
