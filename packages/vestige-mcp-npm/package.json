@@ -1,7 +1,7 @@
 {
   "name": "vestige-mcp-server",
-  "version": "1.6.0",
-  "description": "Vestige MCP Server - AI Memory System for Claude and other assistants",
+  "version": "2.0.0",
+  "description": "Vestige MCP Server — Cognitive memory for AI with FSRS-6, 3D dashboard, and 29 brain modules",
   "bin": {
     "vestige-mcp": "bin/vestige-mcp.js",
     "vestige": "bin/vestige.js"
@@ -14,7 +14,12 @@
     "claude",
     "ai",
     "memory",
-    "vestige"
+    "vestige",
+    "fsrs",
+    "spaced-repetition",
+    "neuroscience",
+    "cognitive",
+    "3d-visualization"
   ],
   "author": "Sam Valladares",
   "license": "AGPL-3.0-only",

@@ -11,8 +11,9 @@ const PLATFORM = os.platform();
 // ─── Branding ───────────────────────────────────────────────────────────────
 
 const BANNER = `
-  vestige init
+  vestige init v2.0
   Give your AI a brain in 10 seconds.
+  Now with 3D dashboard at localhost:3927/dashboard
 `;
 
 // ─── IDE Definitions ────────────────────────────────────────────────────────
@@ -349,6 +350,8 @@ function main() {
     console.log('  3. New session: "What are my coding preferences?"');
     console.log('');
     console.log('Your AI has a brain now.');
+    console.log('');
+    console.log('  Dashboard: http://localhost:3927/dashboard');
   } else {
     console.log('All detected IDEs already have Vestige configured.');
   }
