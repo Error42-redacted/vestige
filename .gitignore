@@ -124,6 +124,12 @@ credentials.json
 .fastembed_cache/
 
 # =============================================================================
+# SvelteKit (intermediate build artifacts — build/ is kept for include_dir!)
+# =============================================================================
+apps/dashboard/.svelte-kit/
+apps/dashboard/node_modules/
+
+# =============================================================================
 # External repos (forks, submodules)
 # =============================================================================
 fastembed-rs/

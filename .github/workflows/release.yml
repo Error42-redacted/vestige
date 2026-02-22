@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to build (e.g., v1.1.1)'
+        description: 'Release tag to build (e.g., v2.0.0)'
         required: true
 
 permissions:
@@ -30,7 +30,7 @@ jobs:
             os: windows-latest
             archive: zip
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-13
             archive: tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest
@@ -38,7 +38,23 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build dashboard
+        run: |
+          cd apps/dashboard
+          pnpm install --frozen-lockfile
+          pnpm build
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
