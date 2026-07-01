@@ -2667,7 +2667,7 @@ fn run_backfill(
             .and_then(|nodes| {
                 nodes
                     .into_iter()
-                    .find(vestige_mcp::tools::backfill::looks_like_failure)
+                    .find(vestige_mcp::tools::backfill::is_aversive_event)
             })
             .map(|n| n.content),
     };

@@ -47,21 +47,29 @@ pub const DEFAULT_LOOKBACK_DAYS: i64 = 30;
 /// considered causally upstream (1 shared file/env-var/service is enough).
 pub const MIN_SHARED_ENTITIES: usize = 1;
 
-/// Words that mark a memory as a failure/"aversive" event when auto-detecting.
-/// Lowercased substring match against content + tags.
-pub const FAILURE_MARKERS: &[&str] = &[
-    "error", "bug", "crash", "crashed", "regression", "broke", "broken",
-    "failure", "failed", "panic", "exception", "fault", "outage", "incident",
-    "500", "timeout", "deadlock", "leak", "corrupt", "stack overflow",
-    // performance/degradation failures (an agent should backfill from these too)
-    "spiked", "latency", "degraded", "slow", "hang", "hung", "throttled",
-    "oom", "502", "503", "504", "rejected", "denied", "flaky",
-    // real-incident vocabulary (CauseBench found these missing — postmortems often
-    // describe failures without the classic crash words above)
+/// STRONG failure markers: vocabulary that virtually never appears benignly. A
+/// single whole-word hit is enough to treat a memory as an aversive event.
+pub const STRONG_FAILURE_MARKERS: &[&str] = &[
+    "crash", "crashed", "panic", "panicked", "segfault", "segmentation fault",
+    "deadlock", "stack overflow", "kernel panic", "core dump", "traceback",
+    "outage", "oom", "out of memory", "data loss", "data corruption",
+    "500", "502", "503", "504",
+];
+
+/// WEAK failure markers: incident vocabulary that ALSO shows up in ordinary
+/// prose — "conversion backlog", "scroll down", "factory reset", "trial and
+/// error", "make an exception". One weak marker is NOT enough on its own; it
+/// needs corroboration (a second distinct marker, or an incident-typed memory).
+/// This is the guard that stops a design note that merely mentions "backlog"
+/// from being mistaken for a failure. See [`is_aversive_event`].
+pub const WEAK_FAILURE_MARKERS: &[&str] = &[
+    "error", "bug", "broke", "broken", "failure", "failed", "fault", "exception",
+    "regression", "incident", "timeout", "leak", "corrupt", "spiked", "latency",
+    "degraded", "slow", "hang", "hung", "throttled", "rejected", "denied", "flaky",
     "pinned", "saturated", "saturation", "stalled", "exhausted", "exhaustion",
     "overload", "overloaded", "backlog", "fell behind", "lag", "lagging",
-    "unavailable", "down", "dropped", "reset", "refused", "stampede",
-    "thrashing", "starved", "starvation", "expired", "expiry", "overflow",
+    "unavailable", "down", "dropped", "reset", "refused", "stampede", "thrashing",
+    "starved", "starvation", "expired", "expiry", "overflow",
 ];
 
 /// How strongly to promote the backfilled cause: multiply its stability by this
@@ -101,17 +109,62 @@ pub struct FailureEvent {
     /// detection must see them too.
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Prediction error / surprise of this event (0..1).
+    /// The memory's node_type. Reflective types (note/insight/decision) are not
+    /// treated as aversive events on a lone ambiguous marker — see
+    /// [`is_aversive_event`]. Defaulted so older serialized events still load.
+    #[serde(default)]
+    pub node_type: String,
+    /// Prediction error / surprise of this event (0..1). Advisory only: the
+    /// trigger gate is [`is_aversive_event`] (marker strength + node_type +
+    /// manual), NOT this value.
     pub prediction_error: f32,
     /// True if a caller explicitly marked this salient (manual override path).
     pub manual: bool,
 }
 
+/// Words that must NEVER become shared-entity join keys, regardless of casing.
+/// Two failure modes motivated this: (1) writers use ALL-CAPS for *emphasis*
+/// ("do NOT", "IN PLACE", "ONLY if", "it KILLS the tax") and the env-var
+/// heuristic below would otherwise mint `not`/`only`/`place`/`kills` as
+/// entities; (2) a stopword recurs across nearly every memory, so it forges
+/// spurious causal edges between unrelated notes. Function words plus the most
+/// common shouted-for-emphasis prose words. Lowercased comparison.
+const ENTITY_STOPWORDS: &[&str] = &[
+    // articles / conjunctions / prepositions / pronouns / auxiliaries
+    "the", "a", "an", "and", "or", "but", "nor", "not", "only", "if", "then",
+    "than", "so", "as", "at", "by", "of", "to", "in", "on", "off", "for", "with",
+    "from", "into", "out", "up", "down", "over", "under", "is", "are", "was",
+    "were", "be", "been", "being", "do", "does", "did", "done", "has", "have",
+    "had", "you", "your", "we", "our", "us", "it", "its", "this", "that", "these",
+    "those", "there", "here", "when", "while", "what", "which", "who", "whom",
+    "how", "why", "all", "any", "each", "both", "few", "more", "most", "some",
+    "such", "no", "own", "same", "too", "very", "can", "will", "just", "also",
+    "yes", "maybe", "per",
+    // common prose verbs/nouns often shouted for emphasis (not identifiers)
+    "place", "kill", "kills", "killed", "merge", "merges", "merged", "back",
+    "want", "mostly", "real", "extra", "new", "old", "one", "two", "zero",
+    "note", "insight", "goal", "plan", "step", "way", "thing", "stuff",
+];
+
+#[inline]
+fn is_entity_stopword(tok: &str) -> bool {
+    ENTITY_STOPWORDS.contains(&tok)
+}
+
 /// Pull shared-entity join keys from content + tags (single source of truth used
-/// by the MCP tool, CLI, and offline pass so they never diverge).
+/// by the MCP tool, CLI, and offline pass so they never diverge). Only real
+/// identifiers become join keys: UPPER_SNAKE/dotted-or-slashed tokens and short
+/// acronyms. Stopwords and ALL-CAPS emphasis prose are rejected so they cannot
+/// forge spurious causal links.
 pub fn extract_entities(content: &str, tags: &[String]) -> Vec<String> {
     use std::collections::HashSet;
-    let mut set: HashSet<String> = tags.iter().map(|t| t.to_lowercase()).collect();
+    // Tags are curated join keys — but drop stopword tags (auto-tagging can emit
+    // "not"/"only") so they never link unrelated memories.
+    let mut set: HashSet<String> = tags
+        .iter()
+        .map(|t| t.to_lowercase())
+        .filter(|t| t.len() >= 2 && !is_entity_stopword(t))
+        .collect();
     for raw in content.split(|c: char| {
         !(c.is_alphanumeric() || c == '_' || c == '.' || c == '/' || c == '-')
     }) {
@@ -119,13 +172,28 @@ pub fn extract_entities(content: &str, tags: &[String]) -> Vec<String> {
         if tok.len() < 3 {
             continue;
         }
+        let lower = tok.to_lowercase();
+        // Reject prose written in ALL-CAPS for emphasis ("do NOT", "ONLY if",
+        // "IN PLACE") before it can masquerade as an identifier.
+        if is_entity_stopword(&lower) {
+            continue;
+        }
+        let alpha = tok.chars().filter(|c| c.is_ascii_alphabetic()).count();
+        let has_digit = tok.chars().any(|c| c.is_ascii_digit());
+        // A genuine env var is UPPER_SNAKE or carries a digit (API_TIMEOUT,
+        // S3_BUCKET, PORT8080). A *bare* all-caps word is either a short acronym
+        // (ESP, SSE, FNV — keep) or shouted prose (MIGRATION, INSIGHT — drop):
+        // require a separator/digit once the token is longer than an acronym.
         let is_env = tok.len() >= 3
-            && tok.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
-            && tok.chars().any(|c| c.is_ascii_uppercase());
+            && tok
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+            && tok.chars().any(|c| c.is_ascii_uppercase())
+            && (tok.contains('_') || has_digit || alpha <= 5);
         let is_path = (tok.contains('/') || tok.contains('.'))
             && tok.chars().any(|c| c.is_ascii_alphabetic());
         if is_env || is_path {
-            set.insert(tok.to_lowercase());
+            set.insert(lower);
         }
     }
     set.into_iter().collect()
@@ -162,32 +230,90 @@ fn contains_marker_word(hay: &str, marker: &str) -> bool {
     false
 }
 
-/// Does this content/tags pair read like a failure? Whole-word marker match over
-/// content + tags (see [`contains_marker_word`] for why whole-word, not substring).
-/// Shared by every caller so failure detection never drifts.
+/// How strongly a memory reads like a failure. `Strong` = at least one
+/// unambiguous marker; `Weak(n)` = only ambiguous markers, `n` distinct ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureStrength {
+    None,
+    Weak(usize),
+    Strong,
+}
+
+/// Lowercased haystack of content + tags, space-joined so a marker can't
+/// straddle the content/tag boundary.
+fn failure_haystack(content: &str, tags: &[String]) -> String {
+    let mut hay = content.to_lowercase();
+    for t in tags {
+        hay.push(' ');
+        hay.push_str(&t.to_lowercase());
+    }
+    hay
+}
+
+/// Classify content+tags by failure strength (whole-word marker match — see
+/// [`contains_marker_word`] for why whole-word, not substring). Shared by every
+/// caller so failure detection never drifts.
+pub fn failure_strength(content: &str, tags: &[String]) -> FailureStrength {
+    let hay = failure_haystack(content, tags);
+    if STRONG_FAILURE_MARKERS
+        .iter()
+        .any(|m| contains_marker_word(&hay, m))
+    {
+        return FailureStrength::Strong;
+    }
+    match WEAK_FAILURE_MARKERS
+        .iter()
+        .filter(|m| contains_marker_word(&hay, m))
+        .count()
+    {
+        0 => FailureStrength::None,
+        n => FailureStrength::Weak(n),
+    }
+}
+
+/// Loose check: does this read like a failure *at all* (any marker)? Used only
+/// to EXCLUDE failures from the candidate-cause pool (a root cause is a quiet
+/// upstream change, not an earlier crash). The strict gate that decides whether
+/// a memory can *trigger* a backfill is [`is_aversive_event`].
 pub fn looks_like_failure(content: &str, tags: &[String]) -> bool {
-    let hay = content.to_lowercase();
-    if FAILURE_MARKERS.iter().any(|m| contains_marker_word(&hay, m)) {
+    !matches!(failure_strength(content, tags), FailureStrength::None)
+}
+
+/// node_types that can represent an *observed* failure/incident. Reflective
+/// types (note, insight, decision, concept, pattern) are the writer reasoning,
+/// not an incident — a lone ambiguous word in them must not fire a backfill.
+pub fn is_incident_type(node_type: &str) -> bool {
+    matches!(
+        node_type.trim().to_lowercase().as_str(),
+        "event" | "bug" | "incident" | "error" | "failure" | "crash" | "regression"
+            | "alert" | "outage"
+    )
+}
+
+/// The real salience gate: is this a genuine aversive event worth reaching
+/// backward from? A strong marker qualifies alone; ambiguous "weak" vocabulary
+/// needs corroboration — a second distinct marker OR an incident-typed memory —
+/// so a design note that merely says "backlog"/"down" is not mistaken for a
+/// failure. `manual` forces it (explicit caller override).
+pub fn is_aversive_event(content: &str, tags: &[String], node_type: &str, manual: bool) -> bool {
+    if manual {
         return true;
     }
-    tags.iter().any(|t| {
-        let tl = t.to_lowercase();
-        FAILURE_MARKERS.iter().any(|m| contains_marker_word(&tl, m))
-    })
+    match failure_strength(content, tags) {
+        FailureStrength::Strong => true,
+        FailureStrength::Weak(n) => n >= 2 || is_incident_type(node_type),
+        FailureStrength::None => false,
+    }
 }
 
 impl FailureEvent {
-    /// Auto-detection: is this memory a salient "aversive event"? True when it
-    /// is sufficiently surprising AND carries a failure marker — or when a caller
-    /// manually flagged it. (The "both" trigger: auto-detect + manual override.)
-    pub fn is_salient(&self, salience_threshold: f32) -> bool {
-        if self.manual {
-            return true;
-        }
-        if self.prediction_error < salience_threshold {
-            return false;
-        }
-        looks_like_failure(&self.content, &self.tags)
+    /// Is this memory a salient aversive event? Delegates to the shared
+    /// [`is_aversive_event`] gate (marker strength + node_type + manual). The
+    /// `_salience_threshold` arg is kept for signature stability; the gate no
+    /// longer keys on a synthesized prediction-error (that was circular — callers
+    /// derived the PE from the very keyword check it then re-gated on).
+    pub fn is_salient(&self, _salience_threshold: f32) -> bool {
+        is_aversive_event(&self.content, &self.tags, &self.node_type, self.manual)
     }
 }
 
@@ -367,6 +493,7 @@ mod tests {
             content: "Service crashed: 500 Internal Server Error on the auth endpoint".into(),
             entities: vec!["auth-service".into(), "API_TIMEOUT".into()],
             tags: vec![],
+            node_type: "event".into(),
             prediction_error: 0.9,
             manual: false,
         }
@@ -438,6 +565,7 @@ mod tests {
             content: "Refactored the logging format for readability".into(),
             entities: vec!["logger".into()],
             tags: vec![],
+            node_type: "note".into(),
             prediction_error: 0.2, // low surprise
             manual: false,
         };
@@ -453,6 +581,7 @@ mod tests {
             content: "Latency crept up on the checkout path".into(),
             entities: vec!["checkout".into()],
             tags: vec![],
+            node_type: "note".into(),
             prediction_error: 0.1,
             manual: true,
         };
@@ -487,5 +616,90 @@ mod tests {
             result.causes.is_empty(),
             "no shared entity => no backfill (don't fabricate a cause)"
         );
+    }
+
+    // ---- regression: the 2.2.0 attribution bug (Eggs, 2026-07-01) ----
+
+    /// An insight note that merely MENTIONS one ambiguous word ("backlog") and is
+    /// written with ALL-CAPS emphasis must NOT be treated as a failure. This is
+    /// the exact memory that mis-fired the first live backfill.
+    #[test]
+    fn reflective_note_with_one_weak_marker_is_not_aversive() {
+        let content = "ESL backport MIGRATION INSIGHT: you mostly do NOT un-merge, \
+                       light-flag IN PLACE; un-merge ONLY if it exceeds 2048 records. \
+                       The merge labor becomes the conversion backlog.";
+        let tags = vec!["modding".to_string(), "migration".to_string()];
+        assert_eq!(failure_strength(content, &tags), FailureStrength::Weak(1));
+        assert!(
+            !is_aversive_event(content, &tags, "note", false),
+            "a reflective note with a single ambiguous marker must not fire a backfill"
+        );
+    }
+
+    /// ...but a real crash note still fires even when typed as a plain note — a
+    /// strong marker alone is enough (we didn't trade recall for precision).
+    #[test]
+    fn strong_marker_fires_even_in_a_note() {
+        let content = "The importer crashed with a segfault on the third file";
+        assert_eq!(failure_strength(content, &[]), FailureStrength::Strong);
+        assert!(is_aversive_event(content, &[], "note", false));
+    }
+
+    /// Two distinct weak markers corroborate each other -> aversive.
+    #[test]
+    fn two_weak_markers_corroborate() {
+        let content = "latency spiked and several requests were dropped";
+        match failure_strength(content, &[]) {
+            FailureStrength::Weak(n) => assert!(n >= 2, "expected >=2 weak markers, got {n}"),
+            other => panic!("expected Weak(>=2), got {other:?}"),
+        }
+        assert!(is_aversive_event(content, &[], "note", false));
+    }
+
+    /// One weak marker is enough when the memory is INCIDENT-typed, but not when
+    /// it is a reflective note.
+    #[test]
+    fn weak_marker_gated_on_node_type() {
+        let content = "the checkout latency was elevated for ten minutes";
+        assert!(matches!(
+            failure_strength(content, &[]),
+            FailureStrength::Weak(_)
+        ));
+        assert!(is_aversive_event(content, &[], "event", false));
+        assert!(!is_aversive_event(content, &[], "note", false));
+    }
+
+    /// ALL-CAPS emphasis words in prose must NOT become shared-entity join keys,
+    /// but genuine env vars, paths, and short acronyms still do.
+    #[test]
+    fn all_caps_emphasis_is_not_an_entity() {
+        let content = "do NOT merge IN PLACE; set API_TIMEOUT=2 and check the ESP load \
+                       in config/mods.ini ONLY if it KILLS the framerate";
+        let ents = extract_entities(content, &["modding".into()]);
+        for junk in ["not", "place", "only", "kills", "merge"] {
+            assert!(
+                !ents.contains(&junk.to_string()),
+                "'{junk}' must not be an entity: {ents:?}"
+            );
+        }
+        assert!(ents.contains(&"api_timeout".to_string()), "env var kept: {ents:?}");
+        assert!(ents.contains(&"esp".to_string()), "short acronym kept: {ents:?}");
+        assert!(
+            ents.contains(&"config/mods.ini".to_string()),
+            "path kept: {ents:?}"
+        );
+        assert!(ents.contains(&"modding".to_string()), "clean tag kept: {ents:?}");
+    }
+
+    /// Stopword TAGS (auto-tagging can emit them) are dropped too.
+    #[test]
+    fn stopword_tags_are_dropped() {
+        let ents = extract_entities(
+            "plain content here",
+            &["not".into(), "only".into(), "auth-service".into()],
+        );
+        assert!(!ents.contains(&"not".to_string()));
+        assert!(!ents.contains(&"only".to_string()));
+        assert!(ents.contains(&"auth-service".to_string()));
     }
 }

@@ -79,13 +79,22 @@ fn extract_entities(node: &KnowledgeNode) -> Vec<String> {
     retroactive_backfill::extract_entities(&node.content, &node.tags)
 }
 
-/// Heuristic: does this memory read like a failure/"aversive event"? Checks both
-/// content AND tags against the full FAILURE_MARKERS list. Public so the CLI and
-/// any caller share ONE failure-detection definition (no drifting subsets).
+/// Loose heuristic: does this memory contain ANY failure marker (strong or weak)?
+/// Used only to EXCLUDE prior failures from the candidate-cause pool. Public so
+/// the CLI shares one definition. The strict trigger gate is [`is_aversive_event`].
 ///
 /// Thin `&KnowledgeNode` adapter over [`retroactive_backfill::looks_like_failure`].
 pub fn looks_like_failure(node: &KnowledgeNode) -> bool {
     retroactive_backfill::looks_like_failure(&node.content, &node.tags)
+}
+
+/// Strict aversive-event gate over a node — the trigger for a backfill. Unlike
+/// [`looks_like_failure`], this requires a strong marker, OR two distinct weak
+/// markers, OR an incident-typed memory (so a reflective note that merely
+/// mentions an incident-ish word does not fire one). Public so the CLI shares
+/// the exact same trigger.
+pub fn is_aversive_event(node: &KnowledgeNode) -> bool {
+    retroactive_backfill::is_aversive_event(&node.content, &node.tags, &node.node_type, false)
 }
 
 pub async fn execute(storage: &Arc<Storage>, args: Option<Value>) -> Result<Value, String> {
@@ -108,11 +117,12 @@ pub async fn execute(storage: &Arc<Storage>, args: Option<Value>) -> Result<Valu
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("failure memory '{id}' not found"))?,
         None => {
-            // most recent memory that looks like a failure
+            // most recent memory that is a genuine aversive event (strict gate,
+            // not merely a note mentioning an incident-ish word)
             let recent = storage.get_all_nodes(scan_limit, 0).map_err(|e| e.to_string())?;
             recent
                 .into_iter()
-                .find(looks_like_failure)
+                .find(is_aversive_event)
                 .ok_or_else(|| {
                     "no failure-like memory found to backfill from; pass failure_id or manual=true"
                         .to_string()
@@ -123,15 +133,18 @@ pub async fn execute(storage: &Arc<Storage>, args: Option<Value>) -> Result<Valu
     let failure_entities = extract_entities(&failure_node);
     let failure_embedding = storage.get_node_embedding(&failure_node.id).ok().flatten();
 
-    // surprise/prediction-error proxy: a failure-marked memory is treated as
-    // high-salience; otherwise fall back to a neutral value (manual can force).
-    let pe = if looks_like_failure(&failure_node) { 0.9_f32 } else { 0.3_f32 };
+    // Advisory telemetry only — the real trigger is is_aversive_event (marker
+    // strength + node_type + manual), evaluated in FailureEvent::is_salient.
+    // Deriving the gate from a PE we synthesized here would be circular; that
+    // circularity was the attribution bug this replaces.
+    let pe = if is_aversive_event(&failure_node) { 0.9_f32 } else { 0.3_f32 };
 
     let failure = FailureEvent {
         id: failure_node.id.clone(),
         content: failure_node.content.clone(),
         entities: failure_entities.clone(),
         tags: failure_node.tags.clone(),
+        node_type: failure_node.node_type.clone(),
         prediction_error: pe,
         manual: args.manual,
     };

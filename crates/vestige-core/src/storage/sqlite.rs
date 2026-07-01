@@ -3672,7 +3672,7 @@ impl SqliteMemoryStore {
             let recent = self.get_all_nodes(CANDIDATE_SCAN, 0).unwrap_or_default();
             let failures: Vec<&KnowledgeNode> = recent
                 .iter()
-                .filter(|n| rb::looks_like_failure(&n.content, &n.tags))
+                .filter(|n| rb::is_aversive_event(&n.content, &n.tags, &n.node_type, false))
                 .take(MAX_FAILURES_PER_CYCLE)
                 .collect();
 
@@ -3687,6 +3687,7 @@ impl SqliteMemoryStore {
                         content: failure_node.content.clone(),
                         entities: rb::extract_entities(&failure_node.content, &failure_node.tags),
                         tags: failure_node.tags.clone(),
+                        node_type: failure_node.node_type.clone(),
                         prediction_error: 0.9,
                         manual: false,
                     };
