@@ -1,0 +1,114 @@
+[package]
+name = "vestige-mcp"
+version = "2.2.0"
+edition = "2024"
+description = "Cognitive memory MCP server for AI agents - FSRS-6, spreading activation, synaptic tagging, 3D dashboard, and 130 years of memory research"
+authors = ["samvallad33"]
+license = "AGPL-3.0-only"
+keywords = ["mcp", "ai", "memory", "fsrs", "neuroscience", "cognitive-science", "spaced-repetition"]
+categories = ["command-line-utilities", "database"]
+repository = "https://github.com/samvallad33/vestige"
+
+[features]
+default = ["embeddings", "ort-download", "vector-search", "connectors", "cloud-sync"]
+embeddings = ["vestige-core/embeddings"]
+vector-search = ["vestige-core/vector-search"]
+# External-source connectors (#57): GitHub Issues / Redmine indexing via the
+# `source_sync` MCP tool. On by default so the tool works out of the box; turn
+# off for a build with no HTTP client.
+connectors = ["vestige-core/connectors"]
+# Hosted managed-sync (Vestige Cloud): `vestige sync --cloud` pushes/pulls the
+# portable archive to the hosted blob service. On by default so the command
+# works out of the box; the binary already links an HTTP client via
+# `connectors`, so this adds no new dependency cost.
+cloud-sync = ["vestige-core/cloud-sync"]
+# Default ort backend: downloads prebuilt ONNX Runtime at build time.
+# Fails on targets without prebuilts (notably x86_64-apple-darwin).
+ort-download = ["embeddings", "vestige-core/ort-download"]
+# Alternative ort backend: runtime-linked system libonnxruntime via dlopen.
+# Required on Intel Mac and on systems with glibc < 2.38.
+# Usage:   cargo build --no-default-features --features ort-dynamic,vector-search
+# Runtime: export ORT_DYLIB_PATH=$(brew --prefix onnxruntime)/lib/libonnxruntime.dylib
+ort-dynamic = ["embeddings", "vestige-core/ort-dynamic"]
+qwen3-embeddings = ["embeddings", "vestige-core/qwen3-embeddings"]
+qwen3-reranker = ["qwen3-embeddings"]
+metal = ["embeddings", "vestige-core/metal"]
+# CUDA GPU acceleration on NVIDIA hardware (Windows / Linux, x86_64 + aarch64).
+# Pairs with `qwen3-embeddings`; see vestige-core Cargo.toml.
+cuda = ["qwen3-embeddings", "vestige-core/cuda"]
+cudnn = ["cuda", "vestige-core/cudnn"]
+
+[[bin]]
+name = "vestige-mcp"
+path = "src/main.rs"
+
+[[bin]]
+name = "vestige-restore"
+path = "src/bin/restore.rs"
+
+[[bin]]
+name = "vestige"
+path = "src/bin/cli.rs"
+
+[dependencies]
+# ============================================================================
+# VESTIGE CORE - The cognitive science engine
+# ============================================================================
+# Includes: FSRS-6, spreading activation, synaptic tagging, hippocampal indexing,
+# memory states, context memory, importance signals, dreams, and more.
+#
+# Only `bundled-sqlite` is always on. `embeddings` and `vector-search` are
+# toggled via vestige-mcp's own feature flags below so `--no-default-features`
+# actually works (previously hardcoded here, which silently defeated the flag).
+vestige-core = { version = "2.2.0", path = "../vestige-core", default-features = false, features = ["bundled-sqlite"] }
+
+# ============================================================================
+# MCP Server Dependencies
+# ============================================================================
+# Async runtime
+tokio = { version = "1", features = ["full", "io-std"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Date/Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Constant-time comparison for auth tokens (prevents timing side-channels)
+subtle = "2"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Platform directories
+directories = "6"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+colored = "3"
+
+# SQLite (for backup WAL checkpoint)
+rusqlite = { version = "0.38", features = ["bundled"] }
+
+# Dashboard (v2.0) - HTTP server + WebSocket + embedded SvelteKit
+axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio", "http1", "ws"] }
+tower = { version = "0.5", features = ["limit"] }
+tower-http = { version = "0.6", features = ["cors", "set-header"] }
+futures-util = "0.3"
+open = "5"
+
+# Embedded SvelteKit dashboard (v2.0)
+include_dir = "0.7"
+mime_guess = "2"
+
+[dev-dependencies]
+tempfile = "3"

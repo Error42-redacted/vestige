@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Check
+        run: cargo check --workspace
+
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  release-build:
+    name: Release Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    # Run on main pushes AND on PRs that touch workflows, Cargo manifests, or
+    # crate sources — so Intel Mac / Linux release targets are validated
+    # before merge, not after.
+    if: |
+      github.ref == 'refs/heads/main' ||
+      github.event_name == 'pull_request'
+    needs: [test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            cargo_flags: ""
+          # Intel Mac builds against a system ONNX Runtime via ort-dynamic
+          # (ort-sys has no x86_64-apple-darwin prebuilts). Compile-only here;
+          # runtime linking is a user concern documented in INSTALL-INTEL-MAC.md.
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            cargo_flags: "--no-default-features --features ort-dynamic,vector-search"
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            cargo_flags: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }} -p vestige-mcp ${{ matrix.cargo_flags }}
+
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../vestige-mcp-${{ matrix.target }}.tar.gz vestige-mcp vestige vestige-restore
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vestige-mcp-${{ matrix.target }}
+          path: vestige-mcp-${{ matrix.target }}.tar.gz

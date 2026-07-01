@@ -1,0 +1,990 @@
+# Changelog
+
+All notable changes to Vestige will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [2.2.0] - 2026-06-29 — "Retroactive Salience + Tool Consolidation"
+
+Three independent value streams land together as a coherent release.
+
+### Added — Retroactive Salience Backfill ("Memory with hindsight")
+
+A faithful port of Cai 2024 (*Nature*). When a **failure** (bug/crash/regression)
+is recorded, Vestige reaches **backward in time** and promotes the quiet earlier
+memory that *caused* it — the root cause a vector search structurally cannot
+surface, because it is not *similar* to the failure, only *causally upstream*
+(it shares an entity: the same file, env var, or service). Backward-only by
+construction. Auto-fires inside the consolidation pass; also exposed as the
+`backfill` MCP tool and the `vestige backfill` CLI command (`--manual`,
+`--contrast`, `--no-promote` dry-run).
+
+### Changed — MCP Tool Consolidation (34 → 13 advertised tools)
+
+The MCP surface is consolidated from 34 tools to **13**: `recall` (folds
+search + deep_reference + contradictions), `maintain` (consolidate/dream/gc/
+importance_score/backup/export/restore), `dedup` (8 merge tools → 1), `graph`
+(explore/predict/memory_graph/composed_graph), `memory_status` (system_status/
+memory_health/timeline/changelog), plus `memory`, `codebase`, `intention`,
+`smart_ingest`, `source_sync`, `session_start`, `suppress`, and the flagship
+`backfill`. Old tool names remain dispatchable as hidden back-compat aliases.
+
+### Improved — `deep_reference` retrieval engine
+
+- **F32 embeddings** (was I8 quantization) — lifts the 0.4–0.6 paraphrase cosine
+  band so close-but-reworded queries actually retrieve.
+- **Reciprocal Rank Fusion** replaces linear score combination in hybrid search.
+- **Claim-vs-memory contradiction** — `recall`/`cross_reference` now test *your
+  claim* against stored memory, surfacing `claim_contradicts_memory` instead of
+  the old "confident silence."
+- **Never-composed semantic-band gate** — admits no-shared-word memory pairs in
+  the 0.45–0.85 cosine band for `vestige compose`.
+- New `vestige recall <query>` and `vestige compose` CLI commands expose the
+  engine outside the MCP path.
+
+### Fixed — security & correctness (multi-model audit swarm)
+
+SSRF/token-exfil hardening, panic/DoS/overflow fixes, deadlock and
+lock-contention fixes, dedup and decay correctness. `usearch` keeps
+`features = ["fp16lib"]` to avoid the Windows MSVC C1021 build break (#71/#94).
+
+## [2.1.27] - 2026-06-19 — "External-Source Connectors"
+
+Roadmap [#57](https://github.com/samvallad33/vestige/issues/57), **Phases 1–4
+(complete)**: Vestige can now act as a durable, local, semantically-searchable
+retrieval layer over an external system of record — GitHub Issues and Redmine —
+without replacing it. The external system stays canonical; Vestige **indexes,
+connects, retrieves, and cites back** to the source record.
+
+Unlike a live ticket-system MCP proxy (which holds no state and is rate-limited
+per query), Vestige keeps a durable embedded index: searchable **offline**,
+**semantically**, joinable with the rest of your memory, temporally versioned,
+and re-syncable **idempotently** with no duplication. To our knowledge no other
+local-first memory layer combines native connectors, external-URL provenance,
+content-hash idempotent sync, and tombstoning of vanished records.
+
+### Added
+
+- **`source_sync` MCP tool** — index an external system into Vestige.
+  - GitHub: `{"source": "github", "repo": "owner/name"}` indexes every issue +
+    its comments. Auth via `GITHUB_TOKEN` (public repos work tokenless at a
+    lower rate limit).
+  - Redmine: `{"source": "redmine", "project": "<id>"}` indexes a project's
+    issues + journals (comments and status/assignment history). Host from
+    `REDMINE_URL`, auth from `REDMINE_API_KEY`.
+  - Re-running updates changed issues in place (no duplicates); `reconcile:
+    true` tombstones issues no longer visible upstream.
+- **Source-aware investigation filters on `search`** (Phase 4) — filter results
+  by `source_system`, `source_project`, `source_id`, `source_type`,
+  `source_author`, a `source_updated_after`/`source_updated_before` date range,
+  and `source_status` (`valid` / `tombstoned` / `any`). Status, tracker, and
+  priority remain filterable via the existing `tag_prefix` (the connectors emit
+  `status:`/`tracker:`/`priority:`/`label:` tags). Applied as post-filters;
+  non-connector memories are excluded from a source-scoped query.
+- **Source envelope** on every memory — structured, machine-readable provenance
+  (`source_system`, `source_id`, `source_url`, `source_updated_at`,
+  `content_hash`, `synced_at`, `source_project`, `source_type`, `source_author`)
+  distinct from the legacy free-form `source` label. Search results gain a
+  `sourceRecord` object (with the canonical `url`) **only** for
+  connector-ingested memories, so an agent can cite and follow the source.
+- **Idempotent sync primitives** (`vestige-core`): `upsert_by_source` (keyed on
+  `(source_system, source_id)`, content-hash change detection), per-connector
+  cursor checkpoints (`connector_cursors`), and `reconcile_source_tombstones`
+  (invalidate-don't-delete via the bitemporal `valid_until`, so a vanished
+  record is retained for audit but drops out of current retrieval).
+- **Connector contract** (`vestige_core::connectors`) — a small source-agnostic
+  `Connector` trait + `run_sync` driver (cursor overlap window, incremental
+  paging, optional deletion reconcile) with two reference connectors behind the
+  optional `connectors` cargo feature (on by default in the MCP server, off in
+  the core library's default features so non-connector consumers link no HTTP
+  client):
+  - **GitHub Issues** — `state=all`, `since` cursor, Link-header pagination,
+    drops PRs, host-pinned next-url.
+  - **Redmine** — `status_id=*` (open + closed), hex-encoded `updated_on>=`
+    cursor, `offset` pagination, per-issue detail fetch for journals (the list
+    endpoint omits them), `X-Redmine-API-Key` header auth.
+
+### Database
+
+- **Migration V17** — nine nullable source-envelope columns on `knowledge_nodes`
+  (additive; every existing memory is untouched), a partial UNIQUE index on
+  `(source_system, source_id)` enforcing one memory per external record while
+  costing nothing for envelope-less legacy rows, and the `connector_cursors`
+  checkpoint table. Idempotent on replay, following the established
+  `add_column_if_missing` pattern.
+
+### Notes
+
+- Local-first and optional: with no `source_sync` call, behavior is unchanged.
+  The default core-library build does not link an HTTP client.
+
+## [2.1.26] - 2026-06-15 — "Configurable Output"
+
+Roadmap **Phase 2: Configurable Output**. Users can now control the default
+shape and size of high-traffic MCP responses with an optional, local-first
+config file — without recompiling and without a cloud service. The default
+behavior is unchanged: a fresh install with no `vestige.toml` behaves exactly
+as before.
+
+### Added
+
+- **`vestige.toml` config file**, loaded from the active Vestige data directory
+  (`<data_dir>/vestige.toml`, alongside `vestige.db`). A missing or malformed
+  file falls back to built-in defaults, so existing installs are unaffected.
+- **`[defaults]` table** with three keys: `detail_level`
+  (`brief` | `summary` | `full`), `limit` (default result count for
+  high-traffic tools), and `profile`.
+- **Output profiles** — `lean`, `default`, `audit`, `research` — each presetting
+  a coherent bundle of detail level, result limit, and whether scores and
+  timestamps are included:
+  - `lean`: `brief` detail, limit 5, scores and timestamps dropped (smallest
+    context cost).
+  - `default`: historical behavior — `summary` detail, tool's own default
+    limit, scores and timestamps present. **Unchanged.**
+  - `audit`: `full` detail with every field, score, and timestamp.
+  - `research`: `full` detail with a larger default limit (25).
+- **Three-layer precedence**, applied per call: an explicit MCP parameter wins
+  over the config file, which wins over the built-in default.
+- **`profile` field** echoed in `search`, `memory_timeline`, `codebase`
+  (`get_context`), and `session_context` responses so the active profile is
+  observable.
+
+### Changed
+
+- `search`, `memory_timeline`, `codebase` (`get_context`), and
+  `session_context` now resolve their default detail level and result limit
+  through the config file when no explicit parameter is supplied. With no
+  `vestige.toml` present, their output is byte-for-byte identical to v2.1.25.
+
+### Documentation
+
+- `docs/CONFIGURATION.md` gains a **Output Configuration (`vestige.toml`)**
+  section documenting the file location, `[defaults]` keys, profile presets,
+  and precedence rules.
+
+## [2.1.25] - 2026-06-12 — "Merge / Supersede Controls"
+
+v2.1.25 ships Phase 3: diff-previewed, confidence-gated, reversible,
+self-explaining combine/dedupe/supersede on a never-delete (bitemporal) store.
+The default is always preview/review — these tools never silently mutate memory.
+The differentiator is the reversible operation log: every merge/supersede/undo is
+an auditable, reversible event with provenance ("why did these combine?") — a git
+reflog for your agent's memory.
+
+### Added
+
+- **Seven new MCP tools** for merge/supersede control:
+  - `merge_candidates` — surface likely duplicate/overlapping clusters with
+    confidence scores and the signals behind each (Fellegi-Sunter
+    match/possible/non-match). Read-only.
+  - `plan_merge` — produce a previewable merge PLAN (a diff of combined
+    content/tags/provenance) without applying it.
+  - `plan_supersede` — preview superseding A with B (bitemporal invalidation,
+    audit-preserving) without applying.
+  - `apply_plan` — execute a previously-generated plan id; recorded as a
+    reversible operation.
+  - `merge_undo` — reverse a prior merge/supersede operation, or list the
+    reversible operation log (the "memory reflog").
+  - `protect` — pin a memory so it can never be auto-merged, superseded, or
+    garbage-collected.
+  - `merge_policy` — get/set the per-project Fellegi-Sunter two thresholds
+    (`match_threshold`, `possible_threshold`) and `auto_apply`.
+- **Bitemporal "invalidate, don't delete" supersede** (Graphiti-style): a
+  superseded memory is kept and stays queryable for audit. It is stamped with
+  `valid_until = now` and a new `superseded_by` lineage pointer, instead of being
+  deleted or merely demoted.
+- **Reversible operation log** (`merge_operations` table) — every applied
+  merge/supersede records an undo payload and provenance signals so any operation
+  can be reversed, including restoring survivor content/tags and clearing the
+  bitemporal invalidation.
+- **Fellegi-Sunter two-threshold scoring** for dedup/merge candidates, combining
+  embedding cosine similarity with tag and content-token overlap. Borderline
+  "possible" matches are surfaced for review instead of force-merged.
+- **Memory protection / pinning** — `protected` column on `knowledge_nodes`;
+  protected memories are excluded from auto-merge/supersede/GC paths.
+- **Migration V14** adding the `merge_plans` and `merge_operations` tables, the
+  `protected` and `superseded_by` columns on `knowledge_nodes`, and their
+  indexes. Idempotent on replay.
+- **Docs**: `docs/MERGE_SUPERSEDE.md` describing the design, the bitemporal
+  model, the two-threshold policy, the reversible operation log, and the tool
+  surface.
+
+### Notes
+
+- All merge/supersede operations are **opt-in and preview-first**. `apply_plan`
+  requires `confirm=true` for `possible`/`non_match` plans, and only applies
+  `match` plans without confirmation when `merge_policy.auto_apply` is enabled
+  (default off). This deliberately avoids the silent-merge / auto-delete /
+  audit-trail-loss anti-patterns reported against other memory systems.
+- The merge policy persists per-project and is also overridable via
+  `VESTIGE_MERGE_MATCH_THRESHOLD`, `VESTIGE_MERGE_POSSIBLE_THRESHOLD`, and
+  `VESTIGE_MERGE_AUTO_APPLY` environment variables.
+
+## [2.1.23] - 2026-05-27 — "Receipt Lock Hardening"
+
+v2.1.23 hardens the Sanhedrin launch path so Receipt Lock is portable,
+observable, and precise enough for broader use.
+
+### Added
+
+- **Model-agnostic Sanhedrin backend presets** for custom OpenAI-compatible
+  servers, small laptops, Ollama, MLX, vLLM, llama.cpp, hosted APIs, and
+  Anthropic via LiteLLM. Sanhedrin no longer guesses a large default verifier.
+- **Fail-open telemetry** in `fail-open.jsonl`, plus a dashboard telemetry API
+  and 7-day ambient dashboard counters for vetoes, appeals, and fail-open runs.
+- **Receipt schema documentation** covering receipt artifacts, appeals, command
+  ledgers, fail-open logs, compatibility rules, and staged-evidence trust
+  boundaries.
+- **Opt-in CUDA feature flags** for Qwen3 embedding builds on NVIDIA hardware.
+
+### Changed
+
+- Receipt Lock strips code fences, inline code, blockquotes, quoted regions, and
+  scoped epistemic hedges before matching verification claims.
+- Structured transcript tool-use receipts are the default evidence path; loose
+  JSON command scanning now requires `VESTIGE_SANHEDRIN_ALLOW_LOOSE_LEDGER=1`.
+- Claim-mode sampling now prioritizes higher-severity claims instead of taking
+  the first eight source-order claims.
+- Hosted Sanhedrin credentials now require `VESTIGE_SANHEDRIN_API_KEY` and are
+  only sent to the configured Sanhedrin endpoint, never to Vestige retrieval.
+- `smart_ingest` batch mode now defaults to `batchMergePolicy: "force_create"`
+  so caller-separated items stay separate unless callers opt into smart merging.
+- CUDA-enabled Qwen3 builds now try `Device::new_cuda(0)` before falling back to
+  Metal or CPU.
+
+### Fixed
+
+- Standalone dashboard mode now hydrates the cognitive engine for Dream and
+  Deep Reference instead of returning 503s.
+- `--data-dir` now rejects existing non-directory paths with a clear error.
+- `vestige-restore` now handles `--help` and `--version` instead of treating
+  them as backup file paths.
+- Smart ingest merge/update responses now include `previousContent`,
+  `mergedFrom`, and `mergePreview` so callers can inspect mutated memories.
+- Daily Sanhedrin telemetry now preserves NOTE and CAUTION buckets instead of
+  folding both into PASS.
+
+## [2.1.22] - 2026-05-25 — "Sanhedrin Receipts"
+
+v2.1.22 makes the optional Sanhedrin hook quieter and more accountable by
+turning draft judgment into local, appealable receipts instead of opaque vetoes.
+
+### Added
+
+- **Receipt Lock** blocks unsupported verification claims such as "tests passed"
+  unless the current transcript contains a matching successful test, build,
+  lint, or typecheck command receipt.
+- **Veto receipts** are written to `~/.vestige/sanhedrin/latest.json` and
+  `latest.html` with Claim -> Verdict -> Precedent -> Fix -> Appeal fields.
+- **Dashboard Verdict Bar** surfaces the latest PASS, NOTE, CAUTION, VETO, or
+  APPEALED state and lets users appeal stale, wrong, or too-strict vetoes.
+- **Appeal training** records feedback in `appeals.jsonl` and suppresses future
+  vetoes for the same claim fingerprint.
+
+### Changed
+
+- Sanhedrin claim-mode output now feeds a per-claim receipt ledger while keeping
+  the existing one-line Stop-hook contract for Claude Code.
+
+## [2.1.21] - 2026-05-24 — "Agent-Neutral Hardening"
+
+v2.1.21 is a release-hardening pass for normal MCP usage across agents. It keeps
+Claude Code Cognitive Sandwich companion files optional while making the MCP
+server, package installer, release workflow, and portable sync path safer.
+
+### Added
+
+- **Agent-neutral memory protocol** — new `docs/AGENT-MEMORY-PROTOCOL.md` gives
+  any MCP-compatible client the same practical memory loop: initialize context,
+  search/deep-reference when needed, save durable facts with `smart_ingest`, and
+  promote/demote/purge with `memory`.
+- **HTTP transport opt-in** — `vestige-mcp` now requires `--http`,
+  `--http-port`, or `VESTIGE_HTTP_ENABLED=1` before starting MCP-over-HTTP.
+- **Release checksums** — release assets now publish `.sha256` files beside each
+  archive.
+
+### Changed
+
+- **`vestige update` is binary-only by default** — Claude Code Cognitive
+  Sandwich companion files refresh only with `vestige update --sandwich-companion`
+  or `vestige sandwich install`.
+- **MCP tool results include structured content** while keeping text content for
+  clients that only consume the classic MCP response shape.
+- **NPM install messaging is agent-neutral** and unsupported release targets
+  fail fast instead of trying to download assets that do not exist.
+- **Portable merge uses UPSERT instead of `INSERT OR REPLACE`** for keyed tables,
+  preserving related rows instead of causing delete-and-insert side effects.
+
+### Fixed
+
+- **Destructive delete confirmation** — `memory(action="delete")` now requires
+  `confirm=true`, matching `purge`; the deprecated `delete_knowledge` shim no
+  longer bypasses confirmation.
+- **Portable purge tombstone sync** — merge imports now carry
+  `deletion_tombstones` and apply purges without retaining deleted memory text.
+  Hard purge tombstones win over newer local edits during portable sync, while
+  tombstone merges keep the newest deletion timestamp.
+- **Vector index reload staleness** — loading persisted embeddings rebuilds the
+  in-memory index from an empty index before adding current embeddings.
+- **HTTP transport hardening** — origin, Accept, session, and protocol-version
+  validation now reject incompatible or cross-origin browser requests earlier.
+- **Init config safety** — `@vestige/init` backs up existing config files, writes
+  atomically, accepts JSONC-style comments/trailing commas, and no longer writes
+  Xcode trust-accepted flags.
+- **Release tag checkout** — manual release builds now checkout the requested tag
+  or ref before packaging.
+
+### Verified
+
+- `cargo test -p vestige-mcp --lib --no-fail-fast`
+- `cargo test -p vestige-mcp --bin vestige-mcp --no-fail-fast`
+- `cargo test -p vestige-core portable_merge_import --no-fail-fast`
+- `cargo test -p vestige-mcp --bin vestige --no-fail-fast`
+- `cargo test -p vestige-e2e-tests --test mcp_protocol --no-fail-fast`
+- `cargo check --workspace`
+- `cargo metadata --format-version 1 --locked --no-deps`
+- `pnpm --filter @vestige/dashboard check`
+- `pnpm --filter @vestige/dashboard test`
+- `pnpm --filter @vestige/dashboard build`
+- `node --check packages/vestige-init/bin/init.js`
+- `node --check packages/vestige-mcp-npm/scripts/postinstall.js`
+- `node --check packages/vestige-mcp-npm/bin/vestige-restore.js`
+
+## [2.1.2] - 2026-05-01 — "Honest Memory"
+
+v2.1.2 focuses on operational trust: exact search stays exact, purge really removes content, contradictions are directly inspectable, and the update flow no longer depends on copied curl commands.
+
+### Added
+
+- **Concrete search mode** — `search` now auto-detects literal queries such as quoted strings, env vars, UUIDs, paths, and code identifiers. Those queries take a keyword/literal path that skips HyDE, semantic fusion, FSRS reweighting, retrieval competition, and spreading activation so exact matches land first.
+- **Irreversible purge** — `memory(action="purge", confirm=true)` permanently removes memory content and embeddings, scrubs `insights.source_memories`, detaches temporal-summary children, prunes graph edges, and writes only a non-content `deletion_tombstones` row for sync/audit.
+- **First-class contradictions tool** — new `contradictions` MCP tool scans a topic or recent memories for trust-weighted disagreements using the same local contradiction logic as `deep_reference`.
+- **Simple update flow** — `vestige update` refreshes the installed binary and companion Sandwich files without requiring users to paste a curl installer.
+- **Pro waitlist preview** — `/dashboard/waitlist` adds a local-only marketing surface for Solo Pro and Team Pro early-access signups. `VITE_WAITLIST_ENDPOINT` and `VITE_SUPPORT_BOT_ENDPOINT` are opt-in dashboard env vars, so no signup data is captured unless endpoints are configured.
+
+### Fixed
+
+- **Dream connection persistence cap** — dense single-domain dreams now persist every connection discovered in that run instead of losing everything beyond the old 1,000-entry live buffer. The live dreamer buffer now keeps up to 200,000 high-scoring recent connections, and the MCP `dream` tool exposes `min_similarity` for corpus-specific tuning.
+- **Embedding-model upgrade repair** — `vestige consolidate` now re-embeds every missing or active-model-mismatched memory in one pass, so v1/v2 mixed stores are no longer left partially unreachable after only the first 100 legacy embeddings are regenerated.
+
+## [2.1.1] - 2026-05-01 — "Portable Sync"
+
+v2.1.1 focuses on user-controlled portability: exact storage archives, merge-safe file sync, pluggable sync backends, and explicit hook opt-ins.
+
+### Added
+
+- **Exact portable archives** — `vestige portable-export` / `vestige portable-import` preserve raw Vestige storage rows: memory IDs, FSRS state, graph edges, suppression state, audit rows, sessions, intentions, and embedding blobs.
+- **Merge-safe imports** — `vestige portable-import --merge` can merge into non-empty databases. It applies `sync_tombstones`, keeps newer local memory rows on timestamp conflicts, preserves stable IDs, and rebuilds FTS after import.
+- **File-backed two-way sync** — `vestige sync <archive>` performs pull-merge-push through a shared portable archive. This works today with Dropbox, iCloud Drive, Syncthing, Git, network shares, and shared folders.
+- **Pluggable portable-sync backend trait** — core now exposes `PortableSyncBackend`, `FilePortableSyncBackend`, and `PortableSyncReport`, so non-file backends can reuse the same merge semantics without reimplementing conflict handling.
+- **Portable restore merge mode** — the MCP `restore` tool accepts `merge: true` for portable archives and returns inserted/updated/deleted/skipped/conflict counts.
+- **Qwen3 embedding opt-in** — build-time and runtime support for Qwen3 embeddings, with model-aware retrieval safeguards so mixed embedding models are not compared in the same vector path.
+
+### Fixed
+
+- **Sanhedrin, preflight, and all Vestige Claude Code hooks are optional again.** The Cognitive Sandwich installer now activates no hooks by default and leaves every preflight hook, every Stop hook, the MLX launchd service, and the 19 GB Qwen model path behind explicit `--enable-preflight`, `--enable-sanhedrin`, or `--with-launchd` flags.
+- **x86-friendly Sanhedrin path.** The verifier bridge now accepts any OpenAI-compatible chat endpoint via `VESTIGE_SANHEDRIN_ENDPOINT` and `VESTIGE_SANHEDRIN_MODEL`, so Linux and Intel Mac users can opt in without MLX or Apple Silicon.
+
+### Verified
+
+- `cargo test -p vestige-core portable --no-fail-fast`
+- `cargo test -p vestige-mcp portable --no-fail-fast`
+- `cargo test --workspace --no-fail-fast`
+- Installer shell/Python/JSON validation and default/preflight/Sanhedrin migration dry-runs.
+
+## [2.1.0] - 2026-04-27 — "Cognitive Sandwich Goes Local"
+
+v2.1.0 ships the Cognitive Sandwich hook harness for Claude Code, with a hotfix that makes every hook layer opt-in. The default installer stages files, removes old Vestige hook wiring, starts no MLX service, downloads no model, and makes no automatic model calls. Users can opt into preflight context, Sanhedrin verification, or the Apple Silicon MLX backend separately.
+
+### Added
+
+- **`hooks/`** — first-class harness-side companion to the Vestige MCP server. 9 production hooks designed for `~/.claude/hooks/`:
+  - `sanhedrin.sh` — Stop hook that invokes the local Qwen Executioner via the Python bridge.
+  - `sanhedrin-local.py` — local backend that POSTs to `mlx_lm.server` (`localhost:8080`) with Vestige evidence injected via the dashboard `/api/deep_reference` HTTP endpoint. TRUST_FLOOR=0.55 evidence filter + topical-relevance gate + inference-verb ban + 8 worked few-shots covering true positives AND false-positive guards.
+  - `synthesis-preflight.sh` — UserPromptSubmit hook that POSTs the user prompt to `/api/deep_reference` and injects the trust-scored reasoning chain into context.
+  - `cwd-state-injector.sh` — captures git status, branch, modified files, open PRs/issues.
+  - `vestige-pulse-daemon.sh` — surfaces fresh Vestige dream insights from the past 20 min.
+  - `preflight-swarm.sh` — spawns the `lateral-thinker` subagent in fresh context for cross-disciplinary structural parallels.
+  - `synthesis-stop-validator.sh` — Stop hook regex against forbidden hedging patterns.
+  - `veto-detector.sh` — fast 50ms regex pre-screen against `veto`-tagged Vestige memories.
+  - `synthesis-gate.sh` — legacy v1 trigger (kept for backward compat).
+  - `settings.fragment.json` — empty default JSON snippet; the installer only wires hooks from the opt-in preflight/Sanhedrin fragments.
+- **Dashboard `/api/changelog` endpoint** — bounded REST event feed for recent `DreamCompleted` and `ConnectionDiscovered` events, used by the Pulse hook to inject fresh synthesis into Claude Code context.
+- **`agents/`** — `executioner.md` (legacy/fallback Haiku 4.5 path), `lateral-thinker.md`, `synthesis-composer.md`.
+- **`launchd/com.vestige.mlx-server.plist.template`** — auto-start `mlx_lm.server` with the Qwen3.6-35B-A3B-4bit model on login. Templated with `__HOME__` and `__MODEL__` placeholders.
+- **`scripts/install-sandwich.sh`** — one-command installer that stages hooks and agents, removes old Vestige hook wiring by default, and only wires optional layers with `--enable-preflight`, `--enable-sanhedrin`, or `--with-launchd`. Backs up `settings.json` to `.bak.pre-sandwich`. Supports `--force`, `--include-memory-loader`, and `--src=PATH`.
+- **`scripts/check-sandwich-prereqs.sh`** — default verifier confirms no Vestige Claude Code hooks are wired. Optional `--preflight` and `--sanhedrin` modes check the corresponding enabled layer.
+- **`docs/COGNITIVE_SANDWICH.md`** — architecture diagram, install guide, performance notes (82 tok/s on M3 Max), uninstall, configuration env vars.
+- **PR #48** — `VESTIGE_DATA_DIR` env-var support + tilde expansion + secure unix perms (thanks @Jelloeater) — directly addresses the ghost env-vars exposed by v2.0.9 cleanup.
+
+### Changed
+
+- **Sanhedrin Executioner backend can run locally or remotely when explicitly enabled.** The bridge targets an OpenAI-compatible chat endpoint, with local `mlx_lm.server` + Qwen3.6-35B-A3B-4bit available behind `--with-launchd` on Apple Silicon. Anthropic API key no longer required for the post-cognitive layer. The `executioner.md` agent definition is retained as manual/fallback only when invoked explicitly via `Task(subagent_type='executioner')`.
+- **All hooks sanitized for public release** — replaced hardcoded personal absolute paths with `$HOME` / `$VESTIGE_*` env vars; removed personal regex tokens.
+- **NPM binary installer now follows package version** — `vestige-mcp-server@2.1.0` downloads release assets from `v2.1.0` instead of a stale hardcoded binary tag, while local workspace installs skip the release-asset download before the tag exists.
+
+### Verified
+
+- `cargo test --workspace --release --no-fail-fast`: **1,229 passing, 0 failed** (366 vestige-core + 358 vestige-mcp lib + 4 vestige-mcp bin + 497 e2e + 4 doctests).
+- Sanhedrin bridge smoke checks: Python bytecode compilation passes, fail-open bridge invocation returns `yes`, and public hook settings validate as JSON.
+- v2.1.0 hotfix installer matrix: default, preflight-only, Sanhedrin-only, full sandwich, legacy-all-hooks migration, and unrelated custom hooks preservation.
+- 8-day Sandwich dogfood: **84% pass rate, 16% legitimate vetoes** caught real hallucinations.
+
+### Closes
+
+- #36 (Agent Hooks for Low-Effort Automatic Memory Capture) — Cognitive Sandwich is the answer.
+
+### Prerequisites for optional local MLX Sanhedrin
+
+- macOS Apple Silicon (M1+) — required only for `--with-launchd` MLX autostart
+- Python 3.10+
+- ~22 GB free RAM (Qwen3.6-35B-A3B-4bit at runtime)
+- First-run model download: ~19 GB from Hugging Face (cached locally thereafter)
+
+### Migration
+
+None required for existing Vestige users. The Cognitive Sandwich is opt-in via `scripts/install-sandwich.sh`; running the default installer removes old Vestige hook wiring and leaves preflight, Sanhedrin, launchd, and the 19 GB model path disabled. The MCP server, schema, and tool surface are bit-identical to v2.0.9.
+
+---
+
+## [2.0.9] - 2026-04-24 — "Autopilot"
+
+Autopilot flips Vestige from passive memory library to self-managing cognitive surface. A single supervised backend task subscribes to the 20-event WebSocket bus and routes live events into the cognitive engine — 14 previously dormant primitives (synaptic tagging, predictive memory, activation spread, prospective polling, auto-consolidation, Rac1 cascade emission) now fire without any MCP tool call. Shipped alongside a 3,091-LOC orphan-code cleanup of the v1.0 tool surface. **No schema changes, tool surface unchanged (24 tools), fully backward compatible with v2.0.8 databases. Opt-out via `VESTIGE_AUTOPILOT_ENABLED=0`.**
+
+### Added
+
+- **Autopilot event subscriber** (`crates/vestige-mcp/src/autopilot.rs`) — two supervised tokio tasks spawned at startup. The event subscriber consumes a `broadcast::Receiver<VestigeEvent>` and routes six event classes:
+  - `MemoryCreated` → `synaptic_tagging.trigger_prp()` (9h retroactive PRP window, Frey & Morris 1997) + `predictive_memory.record_memory_access()`.
+  - `SearchPerformed` → `predictive_memory.record_query()` + top-10 access records. The speculative-retrieval model now warms without waiting for an explicit `predict` call.
+  - `MemoryPromoted` → `activation_network.activate(id, 0.3)` — a small reinforcement ripple through the graph.
+  - `MemorySuppressed` → re-emits the previously-declared-never-emitted `Rac1CascadeSwept` event so the dashboard's cascade wave actually renders.
+  - `ImportanceScored` with `composite_score > 0.85` AND a stored `memory_id` → auto-promote + re-emit `MemoryPromoted`.
+  - `Heartbeat` with `memory_count > 700` → rate-limited `find_duplicates` sweep (6h cooldown + in-flight `JoinHandle` guard against concurrent scans on large DBs).
+
+  The engine mutex is acquired only synchronously per handler and never held across `.await`, so MCP tool dispatch is never starved. A 60-second `tokio::interval` separately polls `prospective_memory.check_triggers(Context)` — matched intentions log at `info!` level today; v2.1 "Autonomic" will surface them mid-conversation.
+- **Panic-resilient supervisors** — both background tasks run inside an outer supervisor loop. If a cognitive hook panics on one bad memory, the supervisor catches `JoinError::is_panic()`, logs the panic, sleeps 5 s, and respawns the inner task. Turns a permanent silent-failure mode into a transient hiccup.
+- **`VESTIGE_AUTOPILOT_ENABLED=0` opt-out** — v2.0.8 users who want the passive-library contract can disable Autopilot entirely. Values `{0, false, no, off}` early-return before any task spawns; anything else (unset, `1`, `true`) enables the default v2.0.9 behavior.
+- **`ImportanceScored.memory_id: Option<String>`** — new optional field on the event variant (`#[serde(default)]`, backward-compatible) so Autopilot's auto-promote path can target a stored memory. Existing emit sites pass `None`.
+
+### Changed
+
+- **3,091 LOC of orphan tool code removed** from `crates/vestige-mcp/src/tools/` — nine v1.0 modules (`checkpoint`, `codebase`, `consolidate`, `ingest`, `intentions`, `knowledge`, `recall`, plus two internal helpers) superseded by the `*_unified` / `maintenance::*` replacements shipped in v2.0.5. Each module verified for zero non-test callers before removal. Tool surface unchanged — all 24 tools continue to work via the unified dispatchers.
+- **Ghost environment-variable documentation scrubbed** — three docs listed env vars (`VESTIGE_DATA_DIR`, `VESTIGE_LOG_LEVEL`, a `VESTIGE_API_KEY` typo) that never existed in any shipping Rust code. Replaced with the real variables the binary actually reads.
+
+### Fixed
+
+- **Dedup-sweep race on large databases** — the `Heartbeat`-triggered `find_duplicates` sweep previously set its cooldown timestamp BEFORE spawning the async scan, which on 100k+ memory DBs (where a sweep can exceed the 6h cooldown) allowed two concurrent scans. Rewritten to track the in-flight `JoinHandle` via `DedupSweepState::is_running()` — the next Heartbeat skips if the previous sweep is still live.
+
+### Verified
+
+- `cargo test --workspace --no-fail-fast`: **1,223 passing, 0 failed**.
+- `cargo clippy -p vestige-mcp --lib --bins -- -D warnings`: clean.
+- Five-agent parallel audit (security, dead-code, flow-trace, runtime-safety, release-prep): all GO.
+
+### Migration
+
+None. v2.0.9 is a pure backend upgrade — tool surface, JSON-RPC schema, storage schema, and CLI flags are bit-identical to v2.0.8. Existing databases open without any migration step. The only behavior change is the Autopilot task running in the background, which is `VESTIGE_AUTOPILOT_ENABLED=0`-gated if you want the old passive-library contract.
+
+## [2.0.8] - 2026-04-23 — "Pulse"
+
+The Pulse release wires the dashboard through to the cognitive engine. Eight new dashboard surfaces expose `deep_reference`, `find_duplicates`, `dream`, FSRS scheduling, 4-channel importance, spreading activation, contradiction arcs, and cross-project pattern transfer — every one of them was MCP-only before. Intel Mac is back on the supported list (Microsoft deprecated x86_64 macOS ONNX Runtime prebuilts; we link dynamically against a Homebrew `onnxruntime` instead). Reasoning Theater, Pulse InsightToast, and the Memory Birth Ritual all ship. No schema migrations.
+
+### Added
+
+- **Reasoning Theater (`/reasoning`)** — Cmd+K Ask palette over the 8-stage `deep_reference` cognitive pipeline: hybrid retrieval → cross-encoder rerank → spreading activation → FSRS-6 trust scoring → temporal supersession → trust-weighted contradiction analysis → relation assessment → template reasoning chain. Every query returns a pre-built reasoning block with evidence cards, confidence meter, contradiction geodesic arcs, superseded-memory lineage, and an evolution timeline. **Zero LLM calls, 100% local.** New HTTP surface `POST /api/deep_reference` wraps `crate::tools::cross_reference::execute`; new WebSocket event `DeepReferenceCompleted` carries primary / supporting / contradicting memory IDs for downstream graph animation.
+- **Pulse InsightToast (v2.2 Pulse)** — real-time toast stack that surfaces `DreamCompleted`, `ConsolidationCompleted`, `ConnectionDiscovered`, `MemoryPromoted`/`Demoted`/`Suppressed`, `MemoryUnsuppressed`, `Rac1CascadeSwept` events the moment they fire. Rate-limited to 1 per 1500ms on connection-discovery cascades. Auto-dismiss after 5-6s, click-to-dismiss, progress bar. Bottom-right on desktop, top-center on mobile.
+- **Memory Birth Ritual (v2.3 Terrarium)** — new memories materialize in the 3D graph on every `MemoryCreated` event: elastic scale-in from a camera-relative cosmic center, quadratic Bezier flight path, glow sprite fades in frames 5-10, label fades in at frame 40, Newton's Cradle docking recoil. 60-frame sequence, zero-alloc math, camera-relative so the birth point stays visible at every zoom level.
+- **7 additional dashboard surfaces** exposing the cognitive engine (v2.4 UI expansion): `/duplicates` (find_duplicates cluster view), `/dreams` (5-stage replay + insight cards), `/schedule` (FSRS calendar + retention forecast), `/importance` (4-channel novelty/arousal/reward/attention radar), `/activation` (spreading-activation network viz), `/contradictions` (trust-weighted conflict arcs), `/patterns` (cross-project pattern-transfer heatmap). Left nav expanded from 8 → 16 entries with single-key shortcuts (R/A/D/C/P/U/X/N).
+- **3D Graph brightness system** — auto distance-compensated node brightness (1.0× at camera <60u, up to 2.4× at far zoom) so nodes don't disappear into exponential fog at zoom-out. User-facing brightness slider in the graph toolbar (☀ icon, range 0.5×-2.5×, localStorage-persisted under `vestige:graph:brightness`). Composes with the auto boost; opacity + glow halo + edge weight track the combined multiplier so nodes stay coherent.
+- **Intel Mac (`x86_64-apple-darwin`) support restored** via the `ort-dynamic` Cargo feature + Homebrew-installed ONNX Runtime. Microsoft is discontinuing x86_64 macOS prebuilts after ONNX Runtime v1.23.0 so `ort-sys` will never ship one for Intel; the dynamic-link path sidesteps that entirely. Install: `brew install onnxruntime` then `ORT_DYLIB_PATH=$(brew --prefix onnxruntime)/lib/libonnxruntime.dylib`. Full guide bundled in the Intel Mac tarball as `INSTALL-INTEL-MAC.md`. **Closes #41.**
+- **Graph default-load fallback** — when the newest memory has zero edges (freshly saved, hasn't accumulated connections yet), `GET /api/graph` silently retries with `sort=connected` so the landing view shows real context instead of a lonely orb. Applies only to default loads; explicit `query` / `center_id` requests are honored as-is. Fires on both backend and client.
+
+### Fixed
+
+- **Contradiction-detection false positives** — adjacent-domain memories are no longer flagged as conflicts just because both contain the word "trust" or "fixed." Four thresholds tightened: `NEGATION_PAIRS` drops the `("not ", "")` + `("no longer", "")` wildcard sentinels; `appears_contradictory` shared-words floor 2 → 4 and correction-signal gating now requires ≥6 shared words + asymmetric presence (one memory carries the signal, the other doesn't); `assess_relation` topic-similarity floor raised 0.15 → 0.55; Stage 5 pairwise contradiction overlap floor 0.15 → 0.4. On an FSRS-6 query this collapses false contradictions from 12 → 0 without regressing the two legitimate contradiction test cases.
+- **Primary-memory selection on `deep_reference`** — previously the reasoning chain picked via `max_by(trust)` and the recommended-answer card picked via `max_by(composite)`, so the chain and citation disagreed on the same query. Unified behind a shared composite (50% hybrid-search relevance + 20% FSRS-6 trust + 30% query-topic-term match fraction) with a hard topic-term filter: a memory cannot be primary unless its content contains at least one substantive query term. Three-tier fallback (on-topic + relevant → on-topic any → all non-superseded) so sparse corpora never starve. Closes the class of bug where high-trust off-topic memories won queries against the actual subject.
+- **Reasoning page information hierarchy** — reasoning chain renders first as the hero (confidence-tinted border glow, inline metadata), then confidence meter + Primary Source citation card, then Cognitive Pipeline visualization, then evidence grid. "Template Reasoning" relabelled "Reasoning"; "Recommended Answer" relabelled "Primary Source" (it's a cited memory, not the conclusion — the chain is the conclusion).
+
+### Changed
+
+- **CI + release workflows** — `release-build` now runs on pull requests too so Intel Mac / aarch64-darwin / Linux / Windows regressions surface before merge. `x86_64-apple-darwin` back in both `ci.yml` and `release.yml` matrices with `cargo_flags: "--no-default-features --features ort-dynamic,vector-search"`. Intel Mac tarball bundles `docs/INSTALL-INTEL-MAC.md` alongside the binaries.
+- **Cargo feature split** — `embeddings` is now code-only (fastembed dep + hf-hub + image-models). New `ort-download` feature carries the prebuilt backend (the historical default); `ort-dynamic` transitively enables `embeddings` so the 27 `#[cfg(feature = "embeddings")]` gates stay active when users swap backends. Default set `["embeddings", "ort-download", "vector-search", "bundled-sqlite"]` — identical behavior for every existing consumer.
+- **Platform availability in README** — macOS Apple Silicon + Intel + Linux x86_64 + Windows x86_64 all shipped as prebuilts. Intel Mac needs `brew install onnxruntime` as a one-time prereq.
+
+### Docs
+
+- New `docs/INSTALL-INTEL-MAC.md` with the Homebrew prereq, binary install, source build, troubleshooting, and the v2.1 `ort-candle` migration plan.
+- README Intel Mac section rewritten with the working install recipe + platform table updated.
+
+### Migration
+
+None. Additive features and bug fixes only. No schema changes, no breaking API changes, no config changes required.
+
+### Contributors
+
+- **danslapman** (#41, #42) — reported the Intel Mac build regression and investigated `ort-tract` as an alternative backend; closure documented that `ort-tract` returns `Unimplemented` when fastembed calls into it, confirming `ort-dynamic` as the correct path forward.
+
+---
+
+## [2.0.7] - 2026-04-19 — "Visible"
+
+Hygiene release plus two UI gap closures. No breaking changes, no new major features, no schema migrations affecting user data beyond V11 dropping two verified-unused tables.
+
+### Added
+
+- **`POST /api/memories/{id}/suppress`** — Dashboard users can now trigger top-down inhibitory control (Anderson 2025 SIF + Davis Rac1 cascade) without dropping to raw MCP. Optional JSON body `{"reason": "..."}` logged for audit. Each call compounds; response includes `suppressionCount`, `priorCount`, `retrievalPenalty`, `reversibleUntil`, `estimatedCascadeNeighbors`, and `labileWindowHours`. Emits the existing `MemorySuppressed` WebSocket event so the 3D graph plays the violet implosion + compounding pulse shipped in v2.0.6.
+- **`POST /api/memories/{id}/unsuppress`** — Reverses a suppression inside the 24h labile window. Returns `stillSuppressed: bool` so the UI can tell a full reversal from a compounded-down state. Emits `MemoryUnsuppressed` for the rainbow-burst reversal animation.
+- **Suppress button on the Memories page** — Third action alongside Promote / Demote / Delete, hover-tooltip explaining the neuroscience ("Top-down inhibition (Anderson 2025). Compounds. Reversible for 24h.").
+- **Uptime in the sidebar footer** — The Heartbeat WebSocket event has carried `uptime_secs` since v2.0.5 but was never rendered. Now displays as `up 3d 4h` / `up 18m` / `up 47s` (compact two-most-significant-units format) next to memory count + retention.
+
+### Fixed
+
+- **`execute_export` no longer panics on unknown format.** The write-out match arm at `maintenance.rs` was `_ => unreachable!()` — defensive `Err(...)` now returns a clean "unsupported export format" message instead of unwinding through the MCP dispatcher.
+- **Dashboard graph page distinguishes empty-database from API failure** (landed in the first half of this branch). Before v2.0.7 any error from `/api/graph` rendered as "No memories yet," which masked real failures. Now the regex + node-count gate splits the two; real errors surface as "Failed to load graph: [sanitized message]" with filesystem paths stripped for info-disclosure hardening.
+- **`predict` MCP tool surfaces a `predict_degraded` flag** instead of silently returning empty vecs on lock poisoning. `tracing::warn!` logs the per-channel error for observability.
+- **`memory_changelog` honors `start` / `end` ISO-8601 bounds.** Previously advertised in the schema since v1.7 but runtime-ignored. Malformed timestamps now return a helpful error instead of silently dropping the filter. Response includes a `filter` field echoing the applied window.
+- **`intention` check honors `include_snoozed`.** Previously silent no-op; snoozed intentions were invisible to check regardless of the arg. Dedup via HashSet guards against storage overlap.
+- **`intention` check response exposes `status` and `snoozedUntil`** so callers can distinguish active-triggered from snoozed-overdue intentions.
+- **Server tool-count comment at `server.rs:212`** updated (23 → 24) to match the runtime assertion.
+
+### Removed
+
+- **Migration V11: drops dead `knowledge_edges` + `compressed_memories` tables.** Both were added speculatively in V4 and marked deprecated in the same migration that created them. Zero INSERT or SELECT anywhere in `crates/`. Frees schema space for future migrations.
+- **`execute_health_check` (71 LOC) + `execute_stats` (179 LOC) in `maintenance.rs`.** Both `#[allow(dead_code)]` since v1.7 with in-file comments routing users to `execute_system_status` instead. Zero callers workspace-wide. Net -273 LOC in the touched file.
+- **`x86_64-apple-darwin` job from `.github/workflows/release.yml`.** The Intel Mac build failed the v2.0.5 AND v2.0.6 release workflows because `ort-sys 2.0.0-rc.11` (pinned by `fastembed 5.13.2`) does not ship Intel Mac prebuilts. `ci.yml` had already dropped the target; `release.yml` is now in sync. README documents the build-from-source path. Future releases should publish clean on all three supported platforms (macOS ARM64, Linux x86_64, Windows MSVC).
+
+### Docs
+
+- Reconciled tool / module / test counts across `README.md`, `CONTRIBUTING.md`, `docs/integrations/windsurf.md`, `docs/integrations/xcode.md`. Ground truth: **24 MCP tools · 29 cognitive modules · 1,292 Rust tests + 171 dashboard tests.**
+- Historical CHANGELOG entries and `docs/launch/*.md` launch materials left unchanged because they are time-stamped artifacts of their respective releases.
+
+### Tests
+
+- **+7 assertions** covering the v2.0.7 behavioral changes: V11 migration drops dead tables + is idempotent on replay, `predict_degraded` false on happy path, `include_snoozed` both paths + `status` field exposure, malformed `start` returns helpful error + `filter` field echo.
+- Full suite: **1,292 Rust passing / 0 failed** across `cargo test --workspace --release`. **171 dashboard tests passing.** Zero clippy warnings on `vestige-core` or `vestige-mcp` under `-D warnings`.
+
+### Audit
+
+Pre-merge audited by 4 parallel reviewers (security, code quality, end-to-end flow trace, external verification). Zero CRITICAL or HIGH findings. Two MEDIUM fixes landed in the branch: graph error-message path sanitization (strip `/path/to/*.{sqlite,rs,db,toml,lock}`, cap 200 chars) and `intention` response `status` field exposure.
+
+---
+
+## [2.0.6] - 2026-04-18 — "Composer"
+
+Polish release aimed at new-user happiness. v2.0.5's cognitive stack was already shipping; v2.0.6 makes it *feel* alive in the dashboard and stays out of your way on the prompt side.
+
+### Added
+
+#### Dashboard visual feedback for six live events
+- `MemorySuppressed` → violet implosion + compounding pulse whose intensity scales with `suppression_count` (Anderson 2025 SIF visualised).
+- `MemoryUnsuppressed` → rainbow burst + green pulse when a memory is brought back within the 24h labile window.
+- `Rac1CascadeSwept` → violet wave across a random neighbour sample while the background Rac1 worker fades co-activated memories.
+- `Connected` → gentle cyan ripple on WebSocket handshake.
+- `ConsolidationStarted` → subtle amber pulses across a 20-node sample during the FSRS-6 decay cycle (matches feed-entry colour).
+- `ImportanceScored` → magenta pulse on the scored node with intensity proportional to composite score.
+
+Before v2.0.6 all six events fired against a silent graph. Users perceived the dashboard as broken or unresponsive during real cognitive work.
+
+#### `VESTIGE_SYSTEM_PROMPT_MODE` environment variable
+- `minimal` (default) — 3-sentence MCP `instructions` string telling the client how to use Vestige and how to react to explicit feedback. Safe for every audience, every client, every use case.
+- `full` — opt in to the composition mandate (Composing / Never-composed / Recommendation response shape + FSRS-trust blocking phrase). Useful for high-stakes decision workflows; misfires on trivial retrievals, which is why it is not the default.
+
+Advertised in `vestige-mcp --help` alongside `VESTIGE_DASHBOARD_ENABLED`.
+
+### Fixed
+
+#### Dashboard intentions page
+- `IntentionItem.priority` was typed as `string` but the API returns the numeric FSRS-style scale (1=low, 2=normal, 3=high, 4=critical). Every intention rendered as "normal priority" regardless of its real value. Now uses a `PRIORITY_LABELS` map keyed by the numeric scale.
+- `trigger_value` was typed as a plain string but the API returns `trigger_data` as a JSON-encoded payload (e.g. `{"type":"time","at":"..."}`). The UI surfaced raw JSON for every non-manual trigger. A new `summarizeTrigger()` helper parses `trigger_data` and picks the most human-readable field — `condition` / `topic` / formatted `at` / `in_minutes` / `codebase/filePattern` — before truncating for display. Closes the loop on PR #26's snake_case TriggerSpec fix at the UI layer.
+
+### Docs
+
+- `README.md` — new "What's New in v2.0.6" header up top; v2.0.5 block strengthened with explicit contrast against Ebbinghaus 1885 passive decay and Anderson 1994 retrieval-induced forgetting; new "Forgetting" row in the RAG-vs-Vestige comparison table.
+- Intel-Mac and Windows install steps replaced with a working `cargo build --release -p vestige-mcp` snippet. The pre-built binaries for those targets are blocked on upstream toolchain gaps (`ort-sys` lacks Intel-Mac prebuilts in the 2.0.0-rc.11 release pinned by `fastembed 5.13.2`; `usearch 2.24.0` hit a Windows MSVC compile break tracked as [usearch#746](https://github.com/unum-cloud/usearch/issues/746)).
+
+### Safety
+
+No regressions of merged contributor PRs — v2.0.6 only touches regions that are non-overlapping with #20 (resource URI strip), #24 (codex integration docs), #26 (snake_case TriggerSpec), #28 (deep_reference query relevance), #29 (older glibc feature flags), #30 (`VESTIGE_DASHBOARD_ENABLED`), #32 (dream eviction), and #33 (keyword-first search).
+
+---
+
+## [2.0.5] - 2026-04-14 — "Intentional Amnesia"
+
+Every AI memory system stores too much. Vestige now treats forgetting as a first-class, neuroscientifically-grounded primitive. This release adds **active forgetting** — top-down inhibitory control over memory retrieval, based on two 2025 papers that no other AI memory system has implemented.
+
+### Scientific grounding
+
+- **Anderson, M. C., Hanslmayr, S., & Quaegebeur, L. (2025).** *"Brain mechanisms underlying the inhibitory control of thought."* Nature Reviews Neuroscience. DOI: [10.1038/s41583-025-00929-y](https://www.nature.com/articles/s41583-025-00929-y). Establishes the right lateral PFC as the domain-general inhibitory controller, and Suppression-Induced Forgetting (SIF) as compounding with each stopping attempt.
+- **Cervantes-Sandoval, I., Chakraborty, M., MacMullen, C., & Davis, R. L. (2020).** *"Rac1 Impairs Forgetting-Induced Cellular Plasticity in Mushroom Body Output Neurons."* Front Cell Neurosci. [PMC7477079](https://pmc.ncbi.nlm.nih.gov/articles/PMC7477079/). Establishes Rac1 GTPase as the active synaptic destabilization mechanism — forgetting is a biological PROCESS, not passive decay.
+
+### Added
+
+#### `suppress` MCP Tool (NEW — Tool #24)
+- **Top-down memory suppression.** Distinct from `memory.delete` (which removes) and `memory.demote` (which is a one-shot hit). Each `suppress` call compounds: `suppression_count` increments, and a `k × suppression_count` penalty (saturating at 80%) is subtracted from retrieval scores during hybrid search.
+- **Rac1 cascade.** Background worker piggybacks the existing consolidation loop, walks `memory_connections` edges from recently-suppressed seeds, and applies attenuated FSRS decay to co-activated neighbors. You don't just forget "Jake" — you fade the café, the roommate, the birthday.
+- **Reversible 24h labile window** — matches Nader reconsolidation semantics on a 24-hour axis. Pass `reverse: true` within 24h to undo. After that, it locks in.
+- **Never deletes** — the memory persists and is still accessible via `memory.get(id)`. It's INHIBITED, not erased.
+
+#### `active_forgetting` Cognitive Module (NEW — #30)
+- `crates/vestige-core/src/neuroscience/active_forgetting.rs` — stateless helper for SIF penalty computation, labile window tracking, and Rac1 cascade factors.
+- 7 unit tests + 9 integration tests = 16 new tests.
+
+#### Migration V10
+- `ALTER TABLE knowledge_nodes ADD COLUMN suppression_count INTEGER DEFAULT 0`
+- `ALTER TABLE knowledge_nodes ADD COLUMN suppressed_at TEXT`
+- Partial indices on both columns for efficient sweep queries.
+- Additive-only — backward compatible with all existing v2.0.x databases.
+
+#### Dashboard
+- `ForgettingIndicator.svelte` — new status pill that pulses when suppressed memories exist.
+- 3D graph nodes dim to 20% opacity and lose emissive glow when suppressed.
+- New WebSocket events: `MemorySuppressed`, `MemoryUnsuppressed`, `Rac1CascadeSwept`.
+- `Heartbeat` event now carries `suppressed_count` for live dashboard display.
+
+### Changed
+
+- `search` scoring pipeline now includes an SIF penalty applied after the accessibility filter.
+- Consolidation worker (`VESTIGE_CONSOLIDATION_INTERVAL_HOURS`, default 6h) now runs `run_rac1_cascade_sweep` after each `run_consolidation` call.
+- Tool count assertion bumped from 23 → 24.
+- Workspace version bumped 2.0.4 → 2.0.5.
+
+### Tests
+
+- Rust: 1,284 passing (up from 1,237). Net +47 new tests for active forgetting, Rac1 cascade, migration V10.
+- Dashboard (Vitest): 171 passing (up from 150). +21 regression tests locking in the issue #31 UI fix.
+- Zero warnings, clippy clean across all targets.
+
+### Fixed
+
+- **Dashboard graph view rendered glowing squares instead of round halos** ([#31](https://github.com/samvallad33/vestige/issues/31)). Root cause: the node glow `THREE.SpriteMaterial` had no `map` set, so `Sprite` rendered as a solid-coloured 1×1 plane; additive blending plus `UnrealBloomPass(strength=0.8, radius=0.4, threshold=0.85)` then amplified the square edges into hard-edged glowing cubes. The aggressive `FogExp2(..., 0.008)` swallowed edges at depth and dark-navy `0x4a4a7a` lines were invisible against the fog. Fix bundled:
+  - Generated a shared 128×128 radial-gradient `CanvasTexture` (module-level singleton) and assigned it as `SpriteMaterial.map`. Gradient stops: `rgba(255,255,255,1.0) → rgba(255,255,255,0.7) → rgba(255,255,255,0.2) → rgba(255,255,255,0.0)`. Sprite now reads as a soft round halo; bloom diffuses cleanly.
+  - Retuned `UnrealBloomPass` to `(strength=0.55, radius=0.6, threshold=0.2)` — gentler, allows mid-tones to bloom instead of only blown-out highlights.
+  - Halved fog density `FogExp2(0x050510, 0.008) → FogExp2(0x0a0a1a, 0.0035)` so distant memories stay visible.
+  - Bumped edge color `0x4a4a7a → 0x8b5cf6` (brand violet). Opacity `0.1 + weight*0.5 → 0.25 + weight*0.5`, cap `0.6 → 0.8`. Added `depthWrite: false` so edges blend cleanly through fog.
+  - Added explicit `scene.background = 0x05050f` and a 2000-point starfield distributed on a spherical shell at radius 600–1000, additive-blended with subtle cool-white/violet vertex colors.
+  - Glow sprite scale bumped `size × 4 → size × 6` so the gradient has visible screen footprint.
+  - All node glow sprites share a single `CanvasTexture` instance (singleton cache — memory leak guard for large graphs).
+  - 21 regression tests added in `apps/dashboard/src/lib/graph/__tests__/ui-fixes.test.ts`. Hybrid strategy: runtime unit tests via the existing `three-mock.ts` (extended to propagate `map`/`color`/`depthWrite`/`blending` params and added `createRadialGradient` to the canvas context mock), plus source-level regex assertions on `scene.ts` and `nodes.ts` magic numbers so any accidental revert of fog/bloom/color/helper fails the suite immediately.
+- `apps/dashboard/package.json` version stale at 2.0.3 — bumped to 2.0.5 to match the workspace.
+- `packages/vestige-mcp-npm/.gitignore` missing `bin/vestige-restore` and `bin/vestige-restore.exe` entries — the other three binaries were already ignored as postinstall downloads.
+
+---
+
+## [2.0.4] - 2026-04-09 — "Deep Reference"
+
+Context windows hit 1M tokens. Memory matters more than ever. This release removes artificial limits, adds contradiction detection, and hardens security.
+
+### Added
+
+#### cross_reference Tool (NEW — Tool #22)
+- **Connect the dots across memories.** Given a query or claim, searches broadly, detects agreements and contradictions between memories, identifies superseded/outdated information, and returns a confidence-scored synthesis.
+- Pairwise contradiction detection using negation pairs + correction signals, gated on shared topic words to prevent false positives.
+- Timeline analysis (newest-first), confidence scoring (agreements boost, contradictions penalize, recency bonus).
+
+#### retrieval_mode Parameter (search tool)
+- `precise` — top results only, no spreading activation or competition. Fast, token-efficient.
+- `balanced` — full 7-stage cognitive pipeline (default, no behavior change).
+- `exhaustive` — 5x overfetch, deep graph traversal, no competition suppression. Maximum recall.
+
+#### get_batch Action (memory tool)
+- `memory({ action: "get_batch", ids: ["id1", "id2", ...] })` — retrieve up to 20 full memory nodes in one call.
+
+### Changed
+- **Token budget raised: 10K → 100K** on search and session_context tools.
+- **HTTP transport CORS**: `permissive()` → localhost-only origin restriction.
+- **Auth token display**: Guarded against panic on short tokens.
+- **Dormant state threshold**: Aligned search (0.3 → 0.4) with memory tool for consistent state classification.
+- **cross_reference false positive prevention**: Requires 2+ shared words before checking negation signals.
+
+### Stats
+- 23 MCP tools, 758 tests passing, 0 failures
+- Full codebase audit: 3 parallel agents, all issues resolved
+
+---
+
+## [2.0.0] - 2026-02-22 — "Cognitive Leap"
+
+The biggest release in Vestige history. A complete visual and cognitive overhaul.
+
+### Added
+
+#### 3D Memory Dashboard
+- **SvelteKit 2 + Three.js dashboard** — full 3D neural visualization at `localhost:3927/dashboard`
+- **7 interactive pages**: Graph (3D force-directed), Memories (browser), Timeline, Feed (real-time events), Explore (connections), Intentions, Stats
+- **WebSocket event bus** — `tokio::broadcast` channel with 16 event types (MemoryCreated, SearchPerformed, DreamStarted/Completed, ConsolidationStarted/Completed, RetentionDecayed, ConnectionDiscovered, ActivationSpread, ImportanceScored, Heartbeat, etc.)
+- **Real-time 3D animations** — memories pulse on access, burst particles on creation, shockwave rings on dreams, golden flash lines on connection discovery, fade on decay
+- **Bloom post-processing** — cinematic neural network aesthetic with UnrealBloomPass
+- **GPU instanced rendering** — 1000+ nodes at 60fps via Three.js InstancedMesh
+- **Text label sprites** — distance-based visibility (fade in <40 units, out >80 units), canvas-based rendering
+- **Dream visualization mode** — purple ambient, slow-motion orbit, sequential memory replay
+- **FSRS retention curves** — SVG `R(t) = e^(-t/S)` with prediction pills at 1d/7d/30d
+- **Command palette** — `Cmd+K` navigation with filtered search
+- **Keyboard shortcuts** — `G` Graph, `M` Memories, `T` Timeline, `F` Feed, `E` Explore, `I` Intentions, `S` Stats, `/` Search
+- **Responsive layout** — desktop sidebar + mobile bottom nav with safe-area-inset
+- **PWA support** — installable via `manifest.json`
+- **Single binary deployment** — SvelteKit build embedded via `include_dir!` macro
+
+#### Engine Upgrades
+- **HyDE query expansion** — template-based Hypothetical Document Embeddings: classify_intent (6 types) → expand_query (3-5 variants) → centroid_embedding. Wired into `semantic_search_raw`
+- **fastembed 5.11** — upgraded from 5.9, adds Nomic v2 MoE + Qwen3 reranker support
+- **Nomic Embed Text v2 MoE** — opt-in via `--features nomic-v2` (475M params, 305M active, 8 experts, Candle backend)
+- **Qwen3 Reranker** — opt-in via `--features qwen3-reranker` (Candle backend, high-precision cross-encoder)
+- **Metal GPU acceleration** — opt-in via `--features metal` (Apple Silicon, significantly faster embedding inference)
+
+#### Backend
+- **Axum WebSocket** — `/ws` endpoint with 5-second heartbeat, live stats (memory count, avg retention, uptime)
+- **7 new REST endpoints** — `POST /api/dream`, `/api/explore`, `/api/predict`, `/api/importance`, `/api/consolidate`, `GET /api/search`, `/api/retention-distribution`, `/api/intentions`
+- **Event emission from MCP tools** — `emit_tool_event()` broadcasts events for smart_ingest, search, dream, consolidate, memory, importance_score
+- **Shared broadcast channel** — single `tokio::broadcast::channel(1024)` shared between dashboard and MCP server
+- **CORS for SvelteKit dev** — `localhost:5173` allowed in dev mode
+
+#### Benchmarks
+- **Criterion benchmark suite** — `cosine_similarity` 296ns, `centroid` 1.3µs, HyDE expand 1.4µs, RRF fusion 17µs
+
+### Changed
+- Version: 1.8.0 → 2.0.0 (both crates)
+- Rust edition: 2024 (MSRV 1.85)
+- Tests: 651 → 734 (352 core + 378 mcp + 4 doctests)
+- Binary size: ~22MB (includes embedded SvelteKit dashboard)
+- CognitiveEngine moved from main.rs binary crate to lib.rs for dashboard access
+- Dashboard served at `/dashboard` prefix (legacy HTML kept at `/` and `/graph`)
+- `McpServer` now accepts optional `broadcast::Sender<VestigeEvent>` for event emission
+
+### Technical
+- `apps/dashboard/` — new SvelteKit app (Svelte 5, Tailwind CSS 4, Three.js 0.172, `@sveltejs/adapter-static`)
+- `dashboard/events.rs` — 16-variant `VestigeEvent` enum with `#[serde(tag = "type", content = "data")]`
+- `dashboard/websocket.rs` — WebSocket upgrade handler with heartbeat + event forwarding
+- `dashboard/static_files.rs` — `include_dir!` macro for embedded SvelteKit build
+- `search/hyde.rs` — HyDE module with intent classification and query expansion
+- `benches/search_bench.rs` — Criterion benchmarks for search pipeline components
+
+---
+
+## [1.8.0] - 2026-02-21
+
+### Added
+- **`session_context` tool** — one-call session initialization replacing 5 separate calls (search × 2, intention check, system_status, predict). Token-budgeted responses (~15K tokens → ~500-1000 tokens). Returns assembled markdown context, `automationTriggers` (needsDream/needsBackup/needsGc), and `expandable` memory IDs for on-demand retrieval.
+- **`token_budget` parameter on `search`** — limits response size (100-10000 tokens). Results exceeding budget moved to `expandable` array with `tokensUsed`/`tokenBudget` tracking.
+- **Reader/writer connection split** — `Storage` struct uses `Mutex<Connection>` for separate reader/writer SQLite handles with WAL mode. All methods take `&self` (interior mutability). `Arc<Mutex<Storage>>` → `Arc<Storage>` across ~30 files.
+- **int8 vector quantization** — `ScalarKind::F16` → `I8` (2x memory savings, <1% recall loss)
+- **Migration v7** — FTS5 porter tokenizer (15-30% keyword recall) + page_size 8192 (10-30% faster large-row reads)
+- 22 new tests for session_context and token_budget (335 → 357 mcp tests, 651 total)
+
+### Changed
+- Tool count: 18 → 19
+- `EmbeddingService::init()` changed from `&mut self` to `&self` (dead `model_loaded` field removed)
+- CLAUDE.md updated: session start uses `session_context`, 19 tools documented, development section reflects storage architecture
+
+### Performance
+- Session init: ~15K tokens → ~500-1000 tokens (single tool call)
+- Vector storage: 2x reduction (F16 → I8)
+- Keyword search: 15-30% better recall (FTS5 porter stemming)
+- Large-row reads: 10-30% faster (page_size 8192)
+- Concurrent reads: non-blocking (reader/writer WAL split)
+
+---
+
+## [1.7.0] - 2026-02-20
+
+### Changed
+- **Tool consolidation: 23 → 18 tools** — merged redundant tools while maintaining 100% backward compatibility via deprecated redirects
+- **`ingest` → `smart_ingest`** — `ingest` was a duplicate of `smart_ingest`; now redirects automatically
+- **`session_checkpoint` → `smart_ingest` batch mode** — new `items` parameter on `smart_ingest` accepts up to 20 items, each running the full cognitive pipeline (importance scoring, intent detection, synaptic tagging, hippocampal indexing). Old `session_checkpoint` skipped the cognitive pipeline.
+- **`promote_memory` + `demote_memory` → `memory` unified** — new `promote` and `demote` actions on the `memory` tool with optional `reason` parameter and full cognitive feedback pipeline (reward signal, reconsolidation, competition)
+- **`health_check` + `stats` → `system_status`** — single tool returns combined health status, full statistics, FSRS preview, cognitive module health, state distribution, warnings, and recommendations
+- **CLAUDE.md automation overhaul** — all 18 tools now have explicit auto-trigger rules; session start expanded to 5 steps (added `system_status` + `predict`); full proactive behaviors table
+
+### Added
+- `smart_ingest` batch mode with `items` parameter (max 20 items, full cognitive pipeline per item)
+- `memory` actions: `promote` and `demote` with optional `reason` parameter
+- `system_status` tool combining health check + statistics + cognitive health
+- 30 new tests (305 → 335)
+
+### Deprecated (still work via redirects)
+- `ingest` → use `smart_ingest`
+- `session_checkpoint` → use `smart_ingest` with `items`
+- `promote_memory` → use `memory(action="promote")`
+- `demote_memory` → use `memory(action="demote")`
+- `health_check` → use `system_status`
+- `stats` → use `system_status`
+
+---
+
+## [1.6.0] - 2026-02-19
+
+### Changed
+- **F16 vector quantization** — USearch vectors stored as F16 instead of F32 (2x storage savings)
+- **Matryoshka 256-dim truncation** — embedding dimensions reduced from 768 to 256 (3x embedding storage savings)
+- **Convex Combination fusion** — replaced RRF with 0.3 keyword / 0.7 semantic weighted fusion for better score preservation
+- **Cross-encoder reranker** — added Jina Reranker v1 Turbo (fastembed TextRerank) for neural reranking (~20% retrieval quality improvement)
+- Combined: **6x vector storage reduction** with better retrieval quality
+- Cross-encoder loads in background — server starts instantly
+- Old 768-dim embeddings auto-migrated on load
+
+---
+
+## [1.5.0] - 2026-02-18
+
+### Added
+- **CognitiveEngine** — 28-module stateful engine with full neuroscience pipeline on every tool call
+- **`dream`** tool — memory consolidation via replay, discovers hidden connections and synthesizes insights
+- **`explore_connections`** tool — graph traversal with chain, associations, and bridges actions
+- **`predict`** tool — proactive retrieval based on context and activity patterns
+- **`restore`** tool — restore memories from JSON backup files
+- **Automatic consolidation** — FSRS-6 decay runs on a 6-hour timer + inline every 100 tool calls
+- ACT-R base-level activation with full access history
+- Episodic-to-semantic auto-merge during consolidation
+- Cross-memory reinforcement on access
+- Park et al. triple retrieval scoring
+- Personalized w20 optimization
+
+### Changed
+- All existing tools upgraded with cognitive pre/post processing pipelines
+- Tool count: 19 → 23
+
+---
+
+## [1.3.0] - 2026-02-12
+
+### Added
+- **`importance_score`** tool — 4-channel neuroscience scoring (novelty, arousal, reward, attention)
+- **`session_checkpoint`** tool — batch smart_ingest up to 20 items with Prediction Error Gating
+- **`find_duplicates`** tool — cosine similarity clustering with union-find for dedup
+- `vestige ingest` CLI command for memory ingestion via command line
+
+### Changed
+- Tool count: 16 → 19
+- Made `get_node_embedding` public in core API
+- Added `get_all_embeddings` for duplicate scanning
+
+---
+
+## [1.2.0] - 2026-02-12
+
+### Added
+- **Web dashboard** — Axum-based on port 3927 with memory browser, search, and system stats
+- **`memory_timeline`** tool — browse memories chronologically, grouped by day
+- **`memory_changelog`** tool — audit trail of memory state transitions
+- **`health_check`** tool — system health status with recommendations
+- **`consolidate`** tool — run FSRS-6 maintenance cycle
+- **`stats`** tool — full memory system statistics
+- **`backup`** tool — create SQLite database backups
+- **`export`** tool — export memories as JSON/JSONL with filters
+- **`gc`** tool — garbage collect low-retention memories
+- `backup_to()` and `get_recent_state_transitions()` storage APIs
+
+### Changed
+- Search now supports `detail_level` (brief/summary/full) to control token usage
+- Tool count: 8 → 16
+
+---
+
+## [1.1.3] - 2026-02-12
+
+### Changed
+- Upgraded to Rust edition 2024
+- Security hardening and dependency updates
+
+### Fixed
+- Dedup on ingest edge cases
+- Intel Mac CI builds
+- NPM package version alignment
+- Removed dead TypeScript package
+
+---
+
+## [1.1.2] - 2025-01-27
+
+### Fixed
+- Embedding model cache now uses platform-appropriate directories instead of polluting project folders
+  - macOS: `~/Library/Caches/com.vestige.core/fastembed`
+  - Linux: `~/.cache/vestige/fastembed`
+  - Windows: `%LOCALAPPDATA%\vestige\cache\fastembed`
+- Can still override with `FASTEMBED_CACHE_PATH` environment variable
+
+---
+
+## [1.1.1] - 2025-01-27
+
+### Fixed
+- UTF-8 string slicing issues in keyword search and prospective memory
+- Silent error handling in MCP stdio protocol
+- Feature flag forwarding between crates
+- All GitHub issues resolved (#1, #3, #4)
+
+### Added
+- Pre-built binaries for Linux, Windows, and macOS (Intel & ARM)
+- GitHub Actions CI/CD for automated releases
+
+---
+
+## [1.1.0] - 2025-01-26
+
+### Changed
+- **Tool Consolidation**: 29 tools → 8 cognitive primitives
+  - `recall`, `semantic_search`, `hybrid_search` → `search`
+  - `get_knowledge`, `delete_knowledge`, `get_memory_state` → `memory`
+  - `remember_pattern`, `remember_decision`, `get_codebase_context` → `codebase`
+  - 5 intention tools → `intention`
+- Stats and maintenance moved from MCP to CLI (`vestige stats`, `vestige health`, etc.)
+
+### Added
+- CLI admin commands: `vestige stats`, `vestige health`, `vestige consolidate`, `vestige restore`
+- Feedback tools: `promote_memory`, `demote_memory`
+- 30+ FAQ entries with verified neuroscience claims
+- Storage modes documentation: Global, per-project, multi-Claude household
+- CLAUDE.md templates for proactive memory use
+- Version pinning via git tags
+
+### Deprecated
+- Old tool names (still work with warnings, removed in v2.0)
+
+---
+
+## [1.0.0] - 2025-01-25
+
+### Added
+- FSRS-6 spaced repetition algorithm with 21 parameters
+- Bjork & Bjork dual-strength memory model (storage + retrieval strength)
+- Local semantic embeddings with fastembed v5 (BGE-base-en-v1.5, 768 dimensions)
+- HNSW vector search with USearch (20x faster than FAISS)
+- Hybrid search combining BM25 keyword + semantic + RRF fusion
+- Two-stage retrieval with reranking (+15-20% precision)
+- MCP server for Claude Desktop integration
+- Tauri desktop application
+- Codebase memory module for AI code understanding
+- Neuroscience-inspired memory mechanisms:
+  - Synaptic Tagging and Capture (retroactive importance)
+  - Context-Dependent Memory (Tulving encoding specificity)
+  - Spreading Activation Networks
+  - Memory States (Active/Dormant/Silent/Unavailable)
+  - Multi-channel Importance Signals (Novelty/Arousal/Reward/Attention)
+  - Hippocampal Indexing (Teyler & Rudy 2007)
+- Prospective memory (intentions and reminders)
+- Sleep consolidation with 5-stage processing
+- Memory compression for long-term storage
+- Cross-project learning for universal patterns
+
+### Changed
+- Upgraded embedding model from all-MiniLM-L6-v2 (384d) to BGE-base-en-v1.5 (768d)
+- Upgraded fastembed from v4 to v5
+
+### Fixed
+- SQL injection protection in FTS5 queries
+- Infinite loop prevention in file watcher
+- SIGSEGV crash in vector index (reserve before add)
+- Memory safety with Mutex wrapper for embedding model
+
+---
+
+## [0.1.0] - 2025-01-24
+
+### Added
+- Initial release
+- Core memory storage with SQLite + FTS5
+- Basic FSRS scheduling
+- MCP protocol support
+- Desktop app skeleton

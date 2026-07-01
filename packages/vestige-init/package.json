@@ -1,0 +1,33 @@
+{
+  "name": "@vestige/init",
+  "version": "2.2.0",
+  "description": "Configure Vestige local memory for MCP-compatible AI agents",
+  "bin": {
+    "vestige-init": "bin/init.js"
+  },
+  "keywords": [
+    "vestige",
+    "mcp",
+    "ai",
+    "memory",
+    "claude",
+    "copilot",
+    "cursor",
+    "opencode",
+    "xcode",
+    "jetbrains",
+    "windsurf",
+    "init",
+    "installer"
+  ],
+  "author": "Sam Valladares",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samvallad33/vestige.git",
+    "directory": "packages/vestige-init"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

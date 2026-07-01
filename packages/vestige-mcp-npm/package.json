@@ -1,0 +1,45 @@
+{
+  "name": "vestige-mcp-server",
+  "version": "2.2.0",
+  "mcpName": "io.github.samvallad33/vestige",
+  "description": "Vestige MCP Server — local cognitive memory for MCP-compatible AI agents",
+  "bin": {
+    "vestige-mcp": "bin/vestige-mcp.js",
+    "vestige": "bin/vestige.js",
+    "vestige-restore": "bin/vestige-restore.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "keywords": [
+    "mcp",
+    "claude",
+    "opencode",
+    "ai",
+    "memory",
+    "vestige",
+    "fsrs",
+    "spaced-repetition",
+    "neuroscience",
+    "cognitive",
+    "3d-visualization"
+  ],
+  "author": "Sam Valladares",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samvallad33/vestige.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
+}

@@ -1,0 +1,574 @@
+@import 'tailwindcss';
+
+@theme {
+	/* Vestige cosmic dark palette */
+	--color-void: #050510;
+	--color-abyss: #0a0a1a;
+	--color-deep: #10102a;
+	--color-surface: #161638;
+	--color-elevated: #1e1e4a;
+	--color-subtle: #2a2a5e;
+	--color-muted: #4a4a7a;
+	--color-dim: #7a7aaa;
+	--color-text: #e0e0ff;
+	--color-bright: #ffffff;
+
+	/* Accent colors */
+	--color-synapse: #6366f1;
+	--color-synapse-glow: #818cf8;
+	--color-dream: #a855f7;
+	--color-dream-glow: #c084fc;
+	--color-memory: #3b82f6;
+	--color-recall: #10b981;
+	--color-decay: #ef4444;
+	--color-warning: #f59e0b;
+
+	/* Node type colors */
+	--color-node-fact: #3b82f6;
+	--color-node-concept: #8b5cf6;
+	--color-node-event: #f59e0b;
+	--color-node-person: #10b981;
+	--color-node-place: #06b6d4;
+	--color-node-note: #6b7280;
+	--color-node-pattern: #ec4899;
+	--color-node-decision: #ef4444;
+
+	--font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+}
+
+/* Base styles */
+html {
+	background: var(--color-void);
+	color: var(--color-text);
+	font-family: var(--font-mono);
+}
+
+/* ═══════════════════════════════════════════
+   OKLCH / DISPLAY-P3 ACCENT PALETTE (PROGRESSIVE ENHANCEMENT)
+   ═══════════════════════════════════════════
+   The @theme block above keeps the original sRGB hex values, which
+   Tailwind reads at build time and which serve as the fallback for
+   sRGB monitors and browsers without OKLCH support.
+
+   When the browser understands oklch(), we redefine the SAME vivid
+   accents + node-type colors using their OKLCH equivalents. These are
+   faithful conversions of the hex values (same hue/chroma identity);
+   on a wide-gamut display-p3 monitor they render more saturated while
+   reading as the same color. The void/abyss/surface neutrals are left
+   untouched — only the vivid accents benefit from the wider gamut. */
+@supports (color: oklch(0 0 0)) {
+	:root {
+		/* Accent colors */
+		--color-synapse: oklch(0.585 0.222 277);
+		--color-synapse-glow: oklch(0.685 0.169 277);
+		--color-dream: oklch(0.627 0.265 304);
+		--color-dream-glow: oklch(0.714 0.203 305);
+		--color-memory: oklch(0.623 0.214 259);
+		--color-recall: oklch(0.696 0.17 162);
+		--color-decay: oklch(0.637 0.237 25);
+		--color-warning: oklch(0.769 0.188 70);
+
+		/* Node type colors */
+		--color-node-fact: oklch(0.623 0.214 259);
+		--color-node-concept: oklch(0.606 0.25 292);
+		--color-node-event: oklch(0.769 0.188 70);
+		--color-node-person: oklch(0.696 0.17 162);
+		--color-node-place: oklch(0.715 0.143 215);
+		--color-node-note: oklch(0.551 0.027 264);
+		--color-node-pattern: oklch(0.656 0.241 354);
+		--color-node-decision: oklch(0.637 0.237 25);
+	}
+}
+
+body {
+	margin: 0;
+	min-height: 100vh;
+	overflow: hidden;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+	width: 6px;
+	height: 6px;
+}
+::-webkit-scrollbar-track {
+	background: transparent;
+}
+::-webkit-scrollbar-thumb {
+	background: var(--color-subtle);
+	border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+	background: var(--color-muted);
+}
+
+/* ═══════════════════════════════════════════
+   GLASSMORPHISM SYSTEM
+   ═══════════════════════════════════════════ */
+
+.glass {
+	background: rgba(22, 22, 56, 0.45);
+	backdrop-filter: blur(20px) saturate(180%);
+	-webkit-backdrop-filter: blur(20px) saturate(180%);
+	border: 1px solid rgba(99, 102, 241, 0.08);
+	box-shadow:
+		inset 0 1px 0 0 rgba(255, 255, 255, 0.03),
+		0 4px 24px rgba(0, 0, 0, 0.3);
+}
+
+.glass-subtle {
+	background: rgba(16, 16, 42, 0.4);
+	backdrop-filter: blur(12px) saturate(150%);
+	-webkit-backdrop-filter: blur(12px) saturate(150%);
+	border: 1px solid rgba(99, 102, 241, 0.06);
+	box-shadow:
+		inset 0 1px 0 0 rgba(255, 255, 255, 0.02),
+		0 2px 12px rgba(0, 0, 0, 0.2);
+}
+
+.glass-sidebar {
+	background: rgba(10, 10, 26, 0.6);
+	backdrop-filter: blur(24px) saturate(180%);
+	-webkit-backdrop-filter: blur(24px) saturate(180%);
+	border-right: 1px solid rgba(99, 102, 241, 0.1);
+	box-shadow:
+		inset -1px 0 0 0 rgba(255, 255, 255, 0.02),
+		4px 0 24px rgba(0, 0, 0, 0.3);
+}
+
+.glass-panel {
+	background: rgba(10, 10, 26, 0.8);
+	backdrop-filter: blur(24px) saturate(180%);
+	-webkit-backdrop-filter: blur(24px) saturate(180%);
+	border: 1px solid rgba(99, 102, 241, 0.1);
+	box-shadow:
+		inset 0 1px 0 0 rgba(255, 255, 255, 0.03),
+		0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+/* ═══════════════════════════════════════════
+   GLOW EFFECTS
+   ═══════════════════════════════════════════ */
+
+.glow-synapse {
+	box-shadow: 0 0 20px rgba(99, 102, 241, 0.3), 0 0 60px rgba(99, 102, 241, 0.1);
+}
+.glow-dream {
+	box-shadow: 0 0 20px rgba(168, 85, 247, 0.3), 0 0 60px rgba(168, 85, 247, 0.1);
+}
+.glow-memory {
+	box-shadow: 0 0 20px rgba(59, 130, 246, 0.3), 0 0 60px rgba(59, 130, 246, 0.1);
+}
+
+/* ═══════════════════════════════════════════
+   ANIMATIONS
+   ═══════════════════════════════════════════ */
+
+/* Pulse animation for live indicators */
+@keyframes pulse-glow {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.5; }
+}
+.animate-pulse-glow {
+	animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* Ambient background orbs */
+@keyframes orb-float-1 {
+	0%, 100% { transform: translate(0, 0) scale(1); }
+	25% { transform: translate(60px, -40px) scale(1.1); }
+	50% { transform: translate(-30px, -80px) scale(0.95); }
+	75% { transform: translate(-60px, -20px) scale(1.05); }
+}
+
+@keyframes orb-float-2 {
+	0%, 100% { transform: translate(0, 0) scale(1); }
+	25% { transform: translate(-50px, 30px) scale(1.08); }
+	50% { transform: translate(40px, 60px) scale(0.92); }
+	75% { transform: translate(20px, -40px) scale(1.03); }
+}
+
+@keyframes orb-float-3 {
+	0%, 100% { transform: translate(0, 0) scale(1); }
+	25% { transform: translate(30px, 50px) scale(1.05); }
+	50% { transform: translate(-60px, 20px) scale(0.98); }
+	75% { transform: translate(40px, -30px) scale(1.1); }
+}
+
+.ambient-orb {
+	position: fixed;
+	border-radius: 50%;
+	filter: blur(80px);
+	pointer-events: none;
+	z-index: 0;
+	opacity: 0.35;
+}
+
+.ambient-orb-1 {
+	width: 400px;
+	height: 400px;
+	background: radial-gradient(circle, rgba(168, 85, 247, 0.4), transparent 70%);
+	top: -10%;
+	right: -5%;
+	animation: orb-float-1 20s ease-in-out infinite;
+}
+
+.ambient-orb-2 {
+	width: 350px;
+	height: 350px;
+	background: radial-gradient(circle, rgba(99, 102, 241, 0.35), transparent 70%);
+	bottom: -15%;
+	left: -5%;
+	animation: orb-float-2 25s ease-in-out infinite;
+}
+
+.ambient-orb-3 {
+	width: 300px;
+	height: 300px;
+	background: radial-gradient(circle, rgba(245, 158, 11, 0.2), transparent 70%);
+	top: 40%;
+	left: 40%;
+	animation: orb-float-3 22s ease-in-out infinite;
+}
+
+/* Active nav indicator with animated gradient border */
+.nav-active-border {
+	position: relative;
+}
+.nav-active-border::before {
+	content: '';
+	position: absolute;
+	left: 0;
+	top: 4px;
+	bottom: 4px;
+	width: 2px;
+	border-radius: 1px;
+	background: linear-gradient(
+		180deg,
+		var(--color-synapse),
+		var(--color-dream),
+		var(--color-synapse)
+	);
+	background-size: 100% 200%;
+	animation: gradient-shift 3s ease-in-out infinite;
+}
+
+@keyframes gradient-shift {
+	0%, 100% { background-position: 0% 0%; }
+	50% { background-position: 0% 100%; }
+}
+
+/* Neural particle animation */
+@keyframes float {
+	0%, 100% { transform: translateY(0) translateX(0); }
+	25% { transform: translateY(-10px) translateX(5px); }
+	50% { transform: translateY(-5px) translateX(-5px); }
+	75% { transform: translateY(-15px) translateX(3px); }
+}
+
+/* Retention bar colors */
+.retention-critical { color: var(--color-decay); }
+.retention-low { color: var(--color-warning); }
+.retention-good { color: var(--color-recall); }
+.retention-strong { color: var(--color-synapse); }
+
+/* ═══════════════════════════════════════════
+   VIEW TRANSITIONS (CROSSFADE)
+   ═══════════════════════════════════════════
+   Native View Transitions API crossfade between routes. Pairs with the
+   onNavigate hook in +layout.svelte that calls document.startViewTransition.
+   Reduced-motion users get an instant cut (the @media guard disables the
+   animation entirely, so the default browser cross-fade does not run). */
+@media not (prefers-reduced-motion: reduce) {
+	::view-transition-old(root),
+	::view-transition-new(root) {
+		animation-duration: 180ms;
+		animation-timing-function: ease;
+	}
+	::view-transition-old(root) {
+		animation-name: vt-fade-out;
+	}
+	::view-transition-new(root) {
+		animation-name: vt-fade-in;
+	}
+
+	@keyframes vt-fade-out {
+		from { opacity: 1; }
+		to { opacity: 0; }
+	}
+	@keyframes vt-fade-in {
+		from { opacity: 0; }
+		to { opacity: 1; }
+	}
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   THE "ALIVE" LAYER  (bleeding-edge, progressively enhanced)
+   ───────────────────────────────────────────────────────────────────────
+   Shared primitives that make every page breathe, respond, and feel seen.
+   Everything here degrades gracefully and is disabled under reduced-motion.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Registered animatable custom props (@property) ──────────────────────
+   Registering a property as <angle>/<percentage> lets the browser TWEEN it,
+   which plain CSS vars can't do. Powers the rotating conic borders below. */
+@property --angle {
+	syntax: '<angle>';
+	initial-value: 0deg;
+	inherits: false;
+}
+@property --shine {
+	syntax: '<percentage>';
+	initial-value: 0%;
+	inherits: false;
+}
+
+/* ── Scroll-reveal (paired with use:reveal) ─────────────────────────────
+   Elements start translated + transparent; .reveal-in lands them. The
+   action toggles the class via IntersectionObserver, with per-item --reveal-delay
+   for staggered list entrances. */
+.reveal {
+	opacity: 0;
+	transform: translateY(var(--reveal-y, 16px));
+	transition:
+		opacity 0.55s cubic-bezier(0.22, 1, 0.36, 1),
+		transform 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+	transition-delay: var(--reveal-delay, 0ms);
+	will-change: opacity, transform;
+}
+.reveal-in {
+	opacity: 1;
+	transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+	.reveal {
+		opacity: 1;
+		transform: none;
+		transition: none;
+	}
+}
+
+/* ── @starting-style page/section entry ─────────────────────────────────
+   Native entry animation with zero JS: the element animates FROM the
+   starting-style the first time it's rendered. Used on route content. */
+@media not (prefers-reduced-motion: reduce) {
+	.enter {
+		transition:
+			opacity 0.4s ease,
+			transform 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+	}
+	@starting-style {
+		.enter {
+			opacity: 0;
+			transform: translateY(10px);
+		}
+	}
+}
+
+/* ── Conic-gradient animated border (premium "live" frame) ──────────────
+   A slowly rotating iridescent ring around a panel. The @property --angle
+   makes the conic gradient's start angle tweenable. Use class .live-border. */
+.live-border {
+	position: relative;
+	isolation: isolate;
+}
+.live-border::before {
+	content: '';
+	position: absolute;
+	inset: -1px;
+	border-radius: inherit;
+	padding: 1px;
+	background: conic-gradient(
+		from var(--angle),
+		transparent 0%,
+		var(--color-synapse) 18%,
+		var(--color-dream) 33%,
+		transparent 50%,
+		transparent 100%
+	);
+	-webkit-mask:
+		linear-gradient(#000 0 0) content-box,
+		linear-gradient(#000 0 0);
+	-webkit-mask-composite: xor;
+	mask-composite: exclude;
+	pointer-events: none;
+	opacity: 0.6;
+	z-index: -1;
+}
+@media not (prefers-reduced-motion: reduce) {
+	.live-border::before {
+		animation: border-rotate 6s linear infinite;
+	}
+	@keyframes border-rotate {
+		to {
+			--angle: 360deg;
+		}
+	}
+}
+
+/* ── Cursor spotlight surface (paired with use:spotlight) ────────────────
+   A soft radial glow follows the pointer across a panel. --spot-x/y/o are
+   set by the action; default opacity 0 so it's invisible until hovered. */
+.spotlight-surface {
+	position: relative;
+	overflow: hidden;
+}
+.spotlight-surface::after {
+	content: '';
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	background: radial-gradient(
+		340px circle at var(--spot-x, 50%) var(--spot-y, 50%),
+		rgba(129, 140, 248, 0.12),
+		transparent 60%
+	);
+	opacity: var(--spot-o, 0);
+	transition: opacity 0.3s ease;
+	z-index: 0;
+}
+
+/* ── Tilt glare (paired with use:tilt glare) ────────────────────────────── */
+.tilt-glare {
+	position: relative;
+	overflow: hidden;
+}
+.tilt-glare::after {
+	content: '';
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	background: radial-gradient(
+		circle at var(--glare-x, 50%) var(--glare-y, 50%),
+		rgba(255, 255, 255, 0.14),
+		transparent 45%
+	);
+	opacity: var(--glare-o, 0);
+	transition: opacity 0.3s ease;
+}
+
+/* ── Breathing live indicator (calmer than a hard blink) ────────────────
+   A dot that gently inhales/exhales scale + glow — reads as "alive,
+   listening" rather than "error blinking". */
+.breathe {
+	animation: breathe 3.2s ease-in-out infinite;
+}
+@keyframes breathe {
+	0%, 100% {
+		transform: scale(1);
+		filter: drop-shadow(0 0 2px currentColor);
+		opacity: 0.85;
+	}
+	50% {
+		transform: scale(1.18);
+		filter: drop-shadow(0 0 7px currentColor);
+		opacity: 1;
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	.breathe { animation: none; }
+}
+
+/* A live "radar ping" ring that expands and fades — wrap a dot in .ping-host. */
+.ping-host {
+	position: relative;
+}
+.ping-host::before {
+	content: '';
+	position: absolute;
+	inset: 0;
+	border-radius: 50%;
+	background: currentColor;
+	opacity: 0.6;
+	z-index: -1;
+}
+@media not (prefers-reduced-motion: reduce) {
+	.ping-host::before {
+		animation: ping 2.4s cubic-bezier(0, 0, 0.2, 1) infinite;
+	}
+	@keyframes ping {
+		0% { transform: scale(1); opacity: 0.5; }
+		80%, 100% { transform: scale(2.6); opacity: 0; }
+	}
+}
+
+/* ── Shimmer skeleton (loading that feels intentional, not frozen) ───────
+   A diagonal light sweep over skeleton blocks. Use .shimmer on the
+   placeholder; it replaces a plain pulse with a directional sheen. */
+.shimmer {
+	position: relative;
+	overflow: hidden;
+	background: rgba(255, 255, 255, 0.03);
+}
+.shimmer::after {
+	content: '';
+	position: absolute;
+	inset: 0;
+	transform: translateX(-100%);
+	background: linear-gradient(
+		90deg,
+		transparent,
+		rgba(129, 140, 248, 0.12),
+		transparent
+	);
+}
+@media not (prefers-reduced-motion: reduce) {
+	.shimmer::after {
+		animation: shimmer 1.6s ease-in-out infinite;
+	}
+	@keyframes shimmer {
+		100% { transform: translateX(100%); }
+	}
+}
+
+/* ── Gradient text that slowly drifts (alive headings) ──────────────────── */
+.text-aurora {
+	background: linear-gradient(
+		100deg,
+		var(--color-synapse-glow),
+		var(--color-dream-glow),
+		var(--color-recall),
+		var(--color-synapse-glow)
+	);
+	background-size: 250% 100%;
+	-webkit-background-clip: text;
+	background-clip: text;
+	color: transparent;
+}
+@media not (prefers-reduced-motion: reduce) {
+	.text-aurora {
+		animation: aurora-drift 8s ease-in-out infinite;
+	}
+	@keyframes aurora-drift {
+		0%, 100% { background-position: 0% 50%; }
+		50% { background-position: 100% 50%; }
+	}
+}
+
+/* ── Hover lift utility — cards rise + glow when pointed at ───────────────*/
+.lift {
+	transition:
+		transform 0.28s cubic-bezier(0.34, 1.56, 0.64, 1),
+		box-shadow 0.28s ease,
+		border-color 0.28s ease;
+}
+.lift:hover {
+	transform: translateY(-3px);
+	box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(99, 102, 241, 0.18);
+}
+@media (prefers-reduced-motion: reduce) {
+	.lift:hover { transform: none; }
+}
+
+/* ── Tabular numerals helper (count-ups don't jitter) ──────────────────── */
+.tabular-nums {
+	font-variant-numeric: tabular-nums;
+	font-feature-settings: 'tnum';
+}
+
+/* ── Focus ring consistency (accessible + on-brand) ─────────────────────── */
+:where(button, a, input, select, [role='button'], [tabindex]):focus-visible {
+	outline: 2px solid var(--color-synapse-glow);
+	outline-offset: 2px;
+	border-radius: 0.4rem;
+}

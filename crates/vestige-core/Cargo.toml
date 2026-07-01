@@ -1,0 +1,194 @@
+[package]
+name = "vestige-core"
+version = "2.2.0"
+edition = "2024"
+rust-version = "1.91"
+authors = ["Vestige Team"]
+description = "Cognitive memory engine - FSRS-6 spaced repetition, semantic embeddings, and temporal memory"
+license = "AGPL-3.0-only"
+repository = "https://github.com/samvallad33/vestige"
+keywords = ["memory", "spaced-repetition", "fsrs", "embeddings", "knowledge-graph"]
+categories = ["science", "database"]
+
+[features]
+default = ["embeddings", "ort-download", "vector-search", "bundled-sqlite"]
+
+# SQLite backend (default, unencrypted)
+bundled-sqlite = ["rusqlite/bundled"]
+
+# Encrypted SQLite via SQLCipher (mutually exclusive with bundled-sqlite)
+# Use: --no-default-features --features encryption,embeddings,ort-download,vector-search
+# Set VESTIGE_ENCRYPTION_KEY env var to enable encryption
+encryption = ["rusqlite/bundled-sqlcipher"]
+
+# Embedding code paths (fastembed dep, hf-hub, image-models). This feature
+# enables the #[cfg(feature = "embeddings")] gates throughout the crate but
+# does NOT pick an ort backend. Pair with EXACTLY ONE of `ort-download`
+# (prebuilt ONNX Runtime, default) or `ort-dynamic` (runtime-linked system
+# libonnxruntime, required on targets without prebuilts).
+embeddings = ["dep:fastembed", "fastembed/hf-hub-native-tls", "fastembed/image-models"]
+
+# Default ort backend: ort-sys downloads prebuilt ONNX Runtime at build time.
+# Requires glibc >= 2.38. Fails on x86_64-apple-darwin (Microsoft is
+# discontinuing Intel Mac prebuilts after ONNX Runtime v1.23.0).
+ort-download = ["embeddings", "fastembed/ort-download-binaries-native-tls"]
+
+# HNSW vector search with USearch (20x faster than FAISS)
+vector-search = ["dep:usearch"]
+
+# Alternative ort backend: runtime-linked against a system libonnxruntime via
+# dlopen. Required on Intel Mac and on systems with glibc < 2.38 (Ubuntu
+# 22.04, Debian 12, RHEL/Rocky 9). Transitively enables `embeddings` so the
+# #[cfg] gates stay active.
+#
+# Usage:   cargo build --no-default-features \
+#              --features ort-dynamic,vector-search,bundled-sqlite
+# Runtime: export ORT_DYLIB_PATH=/path/to/libonnxruntime.{dylib,so}
+#          (e.g. $(brew --prefix onnxruntime)/lib/libonnxruntime.dylib)
+ort-dynamic = ["embeddings", "fastembed/ort-load-dynamic"]
+
+# Nomic Embed Text v2 MoE (475M params, 305M active, Candle backend)
+# Requires: fastembed with nomic-v2-moe feature
+nomic-v2 = ["embeddings", "fastembed/nomic-v2-moe"]
+
+# Qwen3 Embeddings (Candle backend, opt-in for v2.1.1 re-embedding)
+qwen3-embeddings = ["embeddings", "fastembed/qwen3", "dep:candle-core"]
+
+# Backwards-compatible feature alias from the original v2.1.0 naming.
+qwen3-reranker = ["qwen3-embeddings"]
+
+# External-source connectors (#57). The connector *contract*, normalization,
+# and content-hashing are always compiled (pure, no network). This feature adds
+# the network-backed reference connectors (GitHub Issues, …) via `reqwest`, so
+# the default local-first build never links an HTTP client.
+connectors = ["dep:reqwest"]
+
+# Hosted managed-sync backend (Vestige Cloud). Adds the HTTP `PortableSyncBackend`
+# (`HttpPortableSyncBackend`) that pull-merge-pushes the portable archive to a
+# hosted blob endpoint over HTTPS with a per-user sync key. Like `connectors`,
+# this is the ONLY thing that links an HTTP client — the default local-first
+# build stays network-free. Uses `reqwest`'s blocking client because the
+# `PortableSyncBackend` trait methods are synchronous.
+cloud-sync = ["dep:reqwest", "reqwest/blocking", "dep:chacha20poly1305", "dep:argon2"]
+
+# Metal GPU acceleration on Apple Silicon (significantly faster inference)
+metal = ["fastembed/metal"]
+
+# CUDA GPU acceleration on NVIDIA hardware (Windows / Linux, x86_64 + aarch64).
+# Propagates to `candle-core/cuda`, which pulls in `cudarc` and `candle-kernels`
+# for a per-build nvcc compile pass. Pair with `qwen3-embeddings` so the Candle
+# backend is present in the build graph.
+#
+# Build: cargo build --release -p vestige-mcp --features qwen3-embeddings,cuda
+cuda = ["qwen3-embeddings", "candle-core/cuda"]
+
+# cuDNN on top of CUDA — additional fused kernels and faster inference paths.
+cudnn = ["cuda", "candle-core/cudnn"]
+
+
+[dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Date/Time with full timezone support
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID v4 generation
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Error handling
+thiserror = "2"
+
+# Database - SQLite with FTS5 full-text search and JSON
+# Note: "bundled" or "bundled-sqlcipher" added via feature flags above
+rusqlite = { version = "0.38", features = ["chrono", "serde_json"] }
+
+# Platform-specific directories
+directories = "6"
+
+# Async runtime (required for codebase module)
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros"] }
+
+# Tracing for structured logging
+tracing = "0.1"
+
+# Git integration for codebase memory
+# vendored-openssl: Compile OpenSSL from source for cross-compilation support
+git2 = { version = "0.20", features = ["vendored-openssl"] }
+
+# File watching for codebase memory
+notify = "8"
+
+# ============================================================================
+# OPTIONAL: Embeddings (fastembed v5 - local ONNX inference, 2026 bleeding edge)
+# ============================================================================
+# nomic-embed-text-v1.5: 768 dimensions, 8192 token context, Matryoshka support
+# fastembed v5 provides Nomic v2 MoE and Qwen3 feature-gated model loaders.
+fastembed = { version = "5.11", default-features = false, features = ["hf-hub-native-tls", "image-models"], optional = true }
+candle-core = { version = "0.10.2", optional = true }
+
+# ============================================================================
+# OPTIONAL: Vector Search (USearch - HNSW, 20x faster than FAISS)
+# ============================================================================
+# Pinned to 2.23.0 — 2.24.0 introduced a Windows MSVC compile break because
+# its memory_mapping_allocator_gt template references the POSIX MAP_FAILED
+# macro from <sys/mman.h>, which doesn't exist on MSVC. Tracked upstream in
+# unum-cloud/usearch#746. Unpin when the upstream fix lands.
+#
+# Disable default features so release binaries do not include SimSIMD's
+# Haswell+/AVX2/FMA dispatch targets. Those kernels can trigger illegal
+# instructions on older x86_64 CPUs that Vestige otherwise supports (#71).
+#
+# But re-enable `fp16lib` explicitly. usearch's defaults are
+# ["simsimd", "fp16lib"]; with BOTH off, build.rs sets USEARCH_USE_FP16LIB=0
+# and USEARCH_USE_SIMSIMD=0, which selects the bare half-precision `#else`
+# branch in include/usearch/index_plugins.hpp. That branch carries a
+# `#warning` directive, which MSVC's cl.exe treats as fatal error C1021,
+# breaking the Windows build (GCC/Clang only warn). `fp16lib` is a scalar,
+# self-contained fp16<->fp32 conversion library with NO SIMD intrinsics, so
+# re-enabling it sets USEARCH_USE_FP16LIB=1 (taking the non-warning branch)
+# WITHOUT reintroducing the SimSIMD illegal-instruction risk from #71. Do not
+# drop this feature.
+usearch = { version = "=2.23.0", default-features = false, features = ["fp16lib"], optional = true }
+
+# LRU cache for query embeddings
+lru = "0.16"
+trait-variant = "0.1"
+blake3 = "1"
+
+# ============================================================================
+# OPTIONAL: External-source connectors (#57)
+# ============================================================================
+# HTTP client for network-backed reference connectors (GitHub Issues, Redmine).
+# rustls so connectors build with no system OpenSSL dependency. Behind the
+# `connectors` feature — the default local-first build does not link reqwest.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+
+# ============================================================================
+# OPTIONAL: Zero-knowledge client-side encryption for Vestige Cloud sync
+# ============================================================================
+# XChaCha20-Poly1305 AEAD + Argon2id passphrase KDF. The archive is encrypted on
+# the client before upload, so the hosted service only ever stores ciphertext.
+# Behind the `cloud-sync` feature — the default local-first build links neither.
+chacha20poly1305 = { version = "0.10", optional = true }
+argon2 = { version = "0.5", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "search_bench"
+harness = false
+
+[lib]
+name = "vestige_core"
+path = "src/lib.rs"
+
+# Enable doctests
+doctest = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/samvallad33/vestige/tree/main/docs
+    about: Check the docs before opening an issue
+  - name: FAQ
+    url: https://github.com/samvallad33/vestige/blob/main/docs/FAQ.md
+    about: Common questions answered

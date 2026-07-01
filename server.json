@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.samvallad33/vestige",
+  "title": "Vestige",
+  "description": "Local-first cognitive memory and accountability MCP server for AI agents. Uses local SQLite by default, exposes memory/search tools, and adds Receipt Lock to check verification claims against command receipts without requiring cloud services.",
+  "repository": {
+    "url": "https://github.com/samvallad33/vestige",
+    "source": "github"
+  },
+  "version": "2.1.27",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "vestige-mcp-server",
+      "version": "2.1.27",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
