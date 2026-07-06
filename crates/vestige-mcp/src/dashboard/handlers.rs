@@ -1418,8 +1418,11 @@ pub async fn trigger_dream(State(state): State<AppState>) -> Result<Json<Value>,
     // Run dream through CognitiveEngine
     let cog = cognitive.lock().await;
     let (dream_result, new_connections) = cog.dreamer.dream_with_connections(&dream_memories).await;
-    let insights = cog.dreamer.synthesize_insights(&dream_memories);
     drop(cog);
+
+    // The dream already generated insights — re-synthesizing would double the
+    // O(N^2) pairwise work for an identical result
+    let insights = &dream_result.insights_generated;
 
     // Persist new connections
     let mut connections_persisted = 0u64;
@@ -1508,6 +1511,7 @@ pub async fn trigger_dream(State(state): State<AppState>) -> Result<Json<Value>,
             "memoriesCompressed": dream_result.memories_compressed,
             "insightsGenerated": dream_result.insights_generated.len(),
             "durationMs": duration_ms,
+            "effectiveMinSimilarity": dream_result.stats.effective_min_similarity,
         }
     })))
 }

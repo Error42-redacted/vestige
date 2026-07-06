@@ -79,6 +79,8 @@ async fn test_consolidation_generates_novel_insights() {
     let config = DreamConfig {
         max_memories_per_dream: 100,
         min_similarity: 0.1, // Low threshold to ensure connections are found
+        adaptive_threshold: false,
+        adaptive_keep_fraction: 0.1,
         max_insights: 10,
         min_novelty: 0.1, // Lower threshold for testing
         enable_compression: true,
@@ -155,6 +157,7 @@ async fn test_consolidation_generates_novel_insights() {
 async fn test_insight_novelty_scoring() {
     let config = DreamConfig {
         min_novelty: 0.1, // Accept low novelty for testing
+        adaptive_threshold: false,
         ..DreamConfig::default()
     };
     let dreamer = MemoryDreamer::with_config(config);
@@ -211,6 +214,7 @@ async fn test_insight_source_memory_tracking() {
     let config = DreamConfig {
         min_novelty: 0.1,
         min_similarity: 0.2,
+        adaptive_threshold: false,
         ..DreamConfig::default()
     };
     let dreamer = MemoryDreamer::with_config(config);
@@ -271,6 +275,7 @@ async fn test_insight_information_gain() {
     let config = DreamConfig {
         min_novelty: 0.15,
         min_similarity: 0.2,
+        adaptive_threshold: false,
         ..DreamConfig::default()
     };
     let dreamer = MemoryDreamer::with_config(config);
@@ -344,6 +349,7 @@ async fn test_insight_combines_multiple_memories() {
     let config = DreamConfig {
         min_novelty: 0.1,
         min_similarity: 0.15,
+        adaptive_threshold: false,
         max_insights: 20,
         ..DreamConfig::default()
     };
@@ -954,6 +960,7 @@ async fn test_insight_type_classification() {
     let config = DreamConfig {
         min_novelty: 0.1,
         min_similarity: 0.2,
+        adaptive_threshold: false,
         ..DreamConfig::default()
     };
     let dreamer = MemoryDreamer::with_config(config);

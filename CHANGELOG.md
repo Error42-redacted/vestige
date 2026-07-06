@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.2] - 2026-07-05 — "Lucid Dreaming"
+
+The dream becomes self-aware: instead of applying a fixed similarity cutoff,
+it inspects its own pair-similarity distribution and steers the threshold
+itself — scattershot memory batches shatter into topical islands, laser-focused
+batches split at sub-topic granularity.
+
+### Changed — Adaptive dream thresholding ("dreams that fit the batch")
+
+Connection discovery during dreams now self-calibrates instead of applying a
+fixed `min_similarity` of 0.5. Modern embedding models are anisotropic — on
+nomic-embed-text-v1.5, *unrelated* memory pairs score 0.31–0.84 cosine with a
+median of 0.58 — so the fixed cutoff connected 84% of all pairs, percolating
+every dream into one giant cluster and exactly one generic `'topic'` insight
+(empirically: every dream in the changelog history produced exactly 1 insight).
+Adaptive mode keeps the top `adaptive_keep_fraction` (default 10%) of pair
+similarities, with an absolute floor of 0.3 so genuinely unrelated batches stay
+disconnected. Measured on live data: 1 cluster → 5–7 topical clusters, 1
+generic insight → 5–7 named ones.
+
+- `DreamConfig` gains `adaptive_threshold` (default **on**) and
+  `adaptive_keep_fraction` (default 0.10); `min_similarity` still applies when
+  adaptive is off.
+- `dream` tool: passing `min_similarity` now switches to fixed-threshold mode;
+  new `keep_fraction` param tunes adaptive sparsity. Response stats report
+  `adaptive_threshold` + `effective_min_similarity` (also on the dashboard
+  endpoint as `effectiveMinSimilarity`).
+- `maintain` schema now declares the dream params (`memory_count`,
+  `min_similarity`, `keep_fraction`) — previously they were silently stripped
+  by MCP argument validation, making them unreachable.
+
+### Fixed
+
+- Dream insights are no longer re-synthesized a second time after the dream
+  cycle (both the MCP tool and the dashboard endpoint) — this doubled the
+  O(N²) pairwise work and, worse, regenerated the persisted/returned insights
+  under the **default** config, silently ignoring any caller-supplied
+  threshold.
+- Insight text no longer says `'topic'` when no tag clears the >50% majority
+  bar — the cluster's most frequent tag is used as the label of last resort.
+- Pre-existing Windows-only test failure in `maintenance.rs` (portable-export
+  path assertion compared raw strings instead of path components, so `\`
+  separators failed the release gate).
+
+## [2.2.1] - 2026-07-01 — "Hindsight, Corrected"
+
+### Fixed
+
+- Retroactive-salience backfill no longer produces attribution
+  false-positives: stricter entity extraction stops spurious entity joins, and
+  insight notes are no longer auto-selected as "failures" (which had created
+  bogus causal edges). Commit `f4c0eae`; validated live 2026-07-01 — the held
+  dream ran clean with no spurious causal attributions.
+
 ## [2.2.0] - 2026-06-29 — "Retroactive Salience + Tool Consolidation"
 
 Three independent value streams land together as a coherent release.

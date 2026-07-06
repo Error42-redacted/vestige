@@ -1034,7 +1034,8 @@ mod tests {
 
         let path = result["path"].as_str().unwrap();
         assert_eq!(result["format"], "portable");
-        assert!(path.ends_with("exports/portable-test.json"));
+        // Compare path components, not raw strings — Windows paths use '\'
+        assert!(std::path::Path::new(path).ends_with("exports/portable-test.json"));
         assert!(std::path::Path::new(path).exists());
         assert_eq!(
             result["archiveFormat"],

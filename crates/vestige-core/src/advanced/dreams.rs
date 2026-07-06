@@ -75,6 +75,14 @@ const MIN_NOVELTY_SCORE: f64 = 0.3;
 /// Minimum memories needed for insight generation
 const MIN_MEMORIES_FOR_INSIGHT: usize = 2;
 
+/// Fraction of memory pairs kept as connections in adaptive-threshold mode
+const DEFAULT_ADAPTIVE_KEEP_FRACTION: f64 = 0.10;
+
+/// Absolute similarity floor for adaptive mode — a batch of genuinely
+/// unrelated memories must still produce zero connections, no matter how the
+/// percentile cut falls
+const ADAPTIVE_SIMILARITY_FLOOR: f64 = 0.3;
+
 /// Default consolidation interval (6 hours)
 const DEFAULT_CONSOLIDATION_INTERVAL_HOURS: i64 = 6;
 
@@ -966,6 +974,10 @@ pub struct DreamStats {
     pub clusters_found: usize,
     /// Candidate insights considered
     pub candidates_considered: usize,
+    /// Similarity cutoff actually applied this dream (percentile-derived in
+    /// adaptive mode, `min_similarity` otherwise)
+    #[serde(default)]
+    pub effective_min_similarity: f64,
 }
 
 /// A synthesized insight from memory combination
@@ -1028,8 +1040,20 @@ impl InsightType {
 pub struct DreamConfig {
     /// Maximum memories to analyze per dream
     pub max_memories_per_dream: usize,
-    /// Minimum similarity for connection discovery
+    /// Minimum similarity for connection discovery (only consulted when
+    /// `adaptive_threshold` is off)
     pub min_similarity: f64,
+    /// Derive the similarity cutoff from the batch's own pair-similarity
+    /// distribution instead of `min_similarity`. Anisotropic embedding models
+    /// (e.g. nomic) push all pair similarities into a narrow band, so any
+    /// fixed absolute cutoff either percolates every memory into one giant
+    /// cluster or connects nothing.
+    #[serde(default = "default_adaptive_threshold")]
+    pub adaptive_threshold: bool,
+    /// Adaptive mode: fraction of pairs to keep as connections (top-K by
+    /// similarity), clamped to at least the strongest single pair
+    #[serde(default = "default_adaptive_keep_fraction")]
+    pub adaptive_keep_fraction: f64,
     /// Maximum insights to generate
     pub max_insights: usize,
     /// Minimum novelty required for insights
@@ -1042,11 +1066,21 @@ pub struct DreamConfig {
     pub focus_tags: Vec<String>,
 }
 
+fn default_adaptive_threshold() -> bool {
+    true
+}
+
+fn default_adaptive_keep_fraction() -> f64 {
+    DEFAULT_ADAPTIVE_KEEP_FRACTION
+}
+
 impl Default for DreamConfig {
     fn default() -> Self {
         Self {
             max_memories_per_dream: 1000,
             min_similarity: MIN_SIMILARITY_FOR_CONNECTION,
+            adaptive_threshold: default_adaptive_threshold(),
+            adaptive_keep_fraction: default_adaptive_keep_fraction(),
             max_insights: MAX_INSIGHTS_PER_DREAM,
             min_novelty: MIN_NOVELTY_SCORE,
             enable_compression: true,
@@ -1193,8 +1227,7 @@ impl MemoryDreamer {
         stats.memories_analyzed = working_memories.len();
 
         // Phase 1: Discover new connections
-        let new_connections =
-            self.discover_connections(&working_memories, &mut stats, config.min_similarity);
+        let new_connections = self.discover_connections(&working_memories, &mut stats, config);
 
         // Phase 2: Find clusters/patterns
         let clusters = self.find_clusters(&working_memories, &new_connections);
@@ -1248,11 +1281,8 @@ impl MemoryDreamer {
         let mut stats = DreamStats::default();
 
         // Find clusters
-        let connections = self.discover_connections(
-            &memories.iter().collect::<Vec<_>>(),
-            &mut stats,
-            self.config.min_similarity,
-        );
+        let connections =
+            self.discover_connections(&memories.iter().collect::<Vec<_>>(), &mut stats, &self.config);
         let clusters = self.find_clusters(&memories.iter().collect::<Vec<_>>(), &connections);
 
         // Generate insights
@@ -1310,39 +1340,63 @@ impl MemoryDreamer {
         &self,
         memories: &[&DreamMemory],
         stats: &mut DreamStats,
-        min_similarity: f64,
+        config: &DreamConfig,
     ) -> Vec<DiscoveredConnection> {
-        let mut connections = Vec::new();
-
-        // Compare each pair of memories
+        // First pass: score every pair, so adaptive mode can see the whole
+        // similarity distribution before choosing a cutoff
+        let mut scored = Vec::new();
         for i in 0..memories.len() {
             for j in (i + 1)..memories.len() {
                 stats.connections_evaluated += 1;
+                scored.push((i, j, self.calculate_similarity(memories[i], memories[j])));
+            }
+        }
 
+        let similarities: Vec<f64> = scored.iter().map(|(_, _, s)| *s).collect();
+        let threshold = Self::effective_threshold(config, &similarities);
+        stats.effective_min_similarity = threshold;
+
+        let mut connections = Vec::new();
+        for (i, j, similarity) in scored {
+            if similarity >= threshold {
                 let mem_a = &memories[i];
                 let mem_b = &memories[j];
+                let connection_type = self.determine_connection_type(mem_a, mem_b, similarity);
+                let reasoning = self.generate_connection_reasoning(mem_a, mem_b, &connection_type);
 
-                // Calculate similarity
-                let similarity = self.calculate_similarity(mem_a, mem_b);
-
-                if similarity >= min_similarity {
-                    let connection_type = self.determine_connection_type(mem_a, mem_b, similarity);
-                    let reasoning =
-                        self.generate_connection_reasoning(mem_a, mem_b, &connection_type);
-
-                    connections.push(DiscoveredConnection {
-                        from_id: mem_a.id.clone(),
-                        to_id: mem_b.id.clone(),
-                        similarity,
-                        connection_type,
-                        reasoning,
-                        discovered_at: Utc::now(),
-                    });
-                }
+                connections.push(DiscoveredConnection {
+                    from_id: mem_a.id.clone(),
+                    to_id: mem_b.id.clone(),
+                    similarity,
+                    connection_type,
+                    reasoning,
+                    discovered_at: Utc::now(),
+                });
             }
         }
 
         connections
+    }
+
+    /// Resolve the similarity cutoff for this batch.
+    ///
+    /// Adaptive mode keeps the top `adaptive_keep_fraction` of pair
+    /// similarities, self-calibrating to whatever band the embedding model
+    /// produces. A scattershot batch shatters into topical islands; a
+    /// laser-focused batch splits at sub-topic granularity instead of fusing
+    /// into one blob. The floor keeps genuinely unrelated batches
+    /// disconnected.
+    fn effective_threshold(config: &DreamConfig, similarities: &[f64]) -> f64 {
+        if !config.adaptive_threshold || similarities.is_empty() {
+            return config.min_similarity;
+        }
+
+        let keep = config.adaptive_keep_fraction.clamp(0.001, 1.0);
+        let mut sorted = similarities.to_vec();
+        sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        let k = ((sorted.len() as f64) * keep).ceil() as usize;
+        let k = k.clamp(1, sorted.len());
+        sorted[k - 1].max(ADAPTIVE_SIMILARITY_FLOOR)
     }
 
     fn calculate_similarity(&self, a: &DreamMemory, b: &DreamMemory) -> f64 {
@@ -1610,12 +1664,21 @@ impl MemoryDreamer {
 
         let time_span_days = (time_range.1 - time_range.0).num_days();
 
+        // Label of last resort when no tag clears the majority bar: the
+        // cluster's most frequent tag still names the theme better than a
+        // placeholder
+        let label = common_tags
+            .first()
+            .cloned()
+            .or_else(|| Self::most_frequent_tag(memories))
+            .unwrap_or_else(|| "mixed topics".to_string());
+
         if time_span_days > 30 {
             // Temporal trend
             let insight = format!(
                 "Pattern observed over {} days in '{}': recurring theme across {} related memories",
                 time_span_days,
-                common_tags.first().map(|s| s.as_str()).unwrap_or("topic"),
+                label,
                 memories.len()
             );
             (insight, InsightType::TemporalTrend)
@@ -1632,7 +1695,7 @@ impl MemoryDreamer {
             // Recurring pattern
             let insight = format!(
                 "Recurring pattern in '{}': {} instances identified with common characteristics",
-                common_tags.first().map(|s| s.as_str()).unwrap_or("topic"),
+                label,
                 memories.len()
             );
             (insight, InsightType::RecurringPattern)
@@ -1641,10 +1704,27 @@ impl MemoryDreamer {
             let insight = format!(
                 "Synthesis: {} related memories about '{}' suggest broader understanding",
                 memories.len(),
-                common_tags.first().map(|s| s.as_str()).unwrap_or("topic")
+                label
             );
             (insight, InsightType::Synthesis)
         }
+    }
+
+    /// Most frequent tag across a cluster (ties broken alphabetically so
+    /// insight text stays deterministic run-to-run)
+    fn most_frequent_tag(memories: &[&DreamMemory]) -> Option<String> {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for memory in memories {
+            for tag in &memory.tags {
+                *counts.entry(tag.as_str()).or_default() += 1;
+            }
+        }
+        counts
+            .into_iter()
+            .max_by(|(tag_a, count_a), (tag_b, count_b)| {
+                count_a.cmp(count_b).then(tag_b.cmp(tag_a))
+            })
+            .map(|(tag, _)| tag.to_string())
     }
 
     fn calculate_novelty(&self, insight: &str, source_memories: &[&DreamMemory]) -> f64 {
@@ -1914,6 +1994,7 @@ mod tests {
         let dreamer = MemoryDreamer::with_config(DreamConfig {
             max_memories_per_dream: 50,
             min_similarity: 0.1,
+            adaptive_threshold: false,
             ..DreamConfig::default()
         });
 
@@ -1932,6 +2013,118 @@ mod tests {
         assert_eq!(result.new_connections_found, 1_225);
         assert_eq!(connections.len(), 1_225);
         assert_eq!(dreamer.get_connections().len(), 1_225);
+    }
+
+    fn make_embedded_memory(id: &str, embedding: Vec<f32>) -> DreamMemory {
+        DreamMemory {
+            id: id.to_string(),
+            content: format!("embedded memory {id}"),
+            embedding: Some(embedding),
+            tags: vec![],
+            created_at: Utc::now(),
+            access_count: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_adaptive_threshold_keeps_top_fraction() {
+        // 5 memories = 10 pairs. One identical pair (cosine 1.0), the rest
+        // orthogonal (cosine 0.0). keep_fraction 0.1 → exactly the strongest
+        // pair survives, regardless of any fixed min_similarity.
+        let dreamer = MemoryDreamer::with_config(DreamConfig {
+            adaptive_keep_fraction: 0.1,
+            ..DreamConfig::default()
+        });
+
+        let memories = vec![
+            make_embedded_memory("a", vec![1.0, 0.0, 0.0, 0.0, 0.0]),
+            make_embedded_memory("b", vec![1.0, 0.0, 0.0, 0.0, 0.0]),
+            make_embedded_memory("c", vec![0.0, 1.0, 0.0, 0.0, 0.0]),
+            make_embedded_memory("d", vec![0.0, 0.0, 1.0, 0.0, 0.0]),
+            make_embedded_memory("e", vec![0.0, 0.0, 0.0, 1.0, 0.0]),
+        ];
+
+        let (result, connections) = dreamer.dream_with_connections(&memories).await;
+
+        assert_eq!(connections.len(), 1);
+        let conn = &connections[0];
+        assert!(
+            (conn.from_id == "a" && conn.to_id == "b")
+                || (conn.from_id == "b" && conn.to_id == "a")
+        );
+        assert!(result.stats.effective_min_similarity > 0.99);
+    }
+
+    #[tokio::test]
+    async fn test_adaptive_floor_blocks_unrelated_batch() {
+        // All pairs orthogonal → the percentile cut would land at 0.0, but
+        // the floor keeps genuinely unrelated memories disconnected.
+        let dreamer = MemoryDreamer::with_config(DreamConfig {
+            adaptive_keep_fraction: 0.5,
+            ..DreamConfig::default()
+        });
+
+        let memories = vec![
+            make_embedded_memory("a", vec![1.0, 0.0, 0.0, 0.0, 0.0]),
+            make_embedded_memory("b", vec![0.0, 1.0, 0.0, 0.0, 0.0]),
+            make_embedded_memory("c", vec![0.0, 0.0, 1.0, 0.0, 0.0]),
+            make_embedded_memory("d", vec![0.0, 0.0, 0.0, 1.0, 0.0]),
+            make_embedded_memory("e", vec![0.0, 0.0, 0.0, 0.0, 1.0]),
+        ];
+
+        let (result, connections) = dreamer.dream_with_connections(&memories).await;
+
+        assert_eq!(connections.len(), 0);
+        assert!(result.stats.effective_min_similarity >= ADAPTIVE_SIMILARITY_FLOOR);
+    }
+
+    #[tokio::test]
+    async fn test_fixed_threshold_mode_still_respected() {
+        let dreamer = MemoryDreamer::with_config(DreamConfig {
+            adaptive_threshold: false,
+            min_similarity: 0.9,
+            ..DreamConfig::default()
+        });
+
+        let memories = vec![
+            make_embedded_memory("a", vec![1.0, 0.0, 0.0]),
+            make_embedded_memory("b", vec![1.0, 0.0, 0.0]),
+            make_embedded_memory("c", vec![0.0, 1.0, 0.0]),
+            make_embedded_memory("d", vec![0.0, 0.0, 1.0]),
+            make_embedded_memory("e", vec![0.7, 0.7, 0.0]),
+        ];
+
+        let (result, connections) = dreamer.dream_with_connections(&memories).await;
+
+        assert_eq!(connections.len(), 1);
+        assert!((result.stats.effective_min_similarity - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_insight_label_falls_back_to_most_frequent_tag() {
+        let dreamer = MemoryDreamer::new();
+
+        // 'verse' appears twice out of five — frequent but NOT a majority, so
+        // common_tags is empty and the label must come from the fallback.
+        let mut memories = vec![
+            make_memory("1", "notes on the verse cosmology", vec!["verse"]),
+            make_memory("2", "verse faction design", vec!["verse"]),
+            make_memory("3", "shader pipeline fix", vec!["shaders"]),
+            make_memory("4", "quest scripting pass", vec!["quests"]),
+            make_memory("5", "dialogue tree cleanup", vec!["dialogue"]),
+        ];
+        // Stretch the time span past 30 days to hit the TemporalTrend branch
+        memories[0].created_at = Utc::now() - Duration::days(40);
+
+        let refs: Vec<&DreamMemory> = memories.iter().collect();
+        let insight = dreamer.generate_insight_from_cluster(&refs).unwrap();
+
+        assert!(
+            insight.insight.contains("'verse'"),
+            "expected most-frequent-tag label, got: {}",
+            insight.insight
+        );
+        assert!(!insight.insight.contains("'topic'"));
     }
 
     #[test]

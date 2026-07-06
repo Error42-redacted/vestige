@@ -238,6 +238,8 @@ async fn test_dream_cycle_generates_insights() {
     let config = DreamConfig {
         max_memories_per_dream: 100,
         min_similarity: 0.1,
+        adaptive_threshold: false,
+        adaptive_keep_fraction: 0.1,
         max_insights: 10,
         min_novelty: 0.1,
         enable_compression: true,

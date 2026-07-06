@@ -37,6 +37,10 @@ pub fn schema() -> Value {
                 "enum": ["consolidate", "dream", "gc", "importance_score", "backup", "export", "restore"],
                 "description": "Maintenance op. 'consolidate' (run FSRS-6 decay/embedding cycle), 'dream' (replay memories → insights/connections), 'gc' (garbage-collect stale memories; dry_run=true by default), 'importance_score' (4-channel neuroscience score for 'content'), 'backup' (SQLite DB backup), 'export' (memories as JSON/JSONL with filters), 'restore' (restore from a JSON backup at 'path')."
             },
+            // --- dream ---
+            "memory_count": { "type": "integer", "description": "[dream] Number of recent memories to dream about (default 50, max 500)." },
+            "min_similarity": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "[dream] FIXED connection threshold; passing this disables adaptive thresholding. Omit to self-calibrate. Embedding pair similarities rarely exceed ~0.85." },
+            "keep_fraction": { "type": "number", "minimum": 0.01, "maximum": 1.0, "description": "[dream] Adaptive mode: fraction of memory pairs to keep as connections (default 0.10). Lower = sparser, sharper clusters. Ignored when min_similarity is set." },
             // --- gc ---
             "min_retention": { "type": "number", "minimum": 0.0, "maximum": 1.0, "description": "[gc] Collect memories below this retention (default 0.1)." },
             "dry_run": { "type": "boolean", "description": "[gc] Preview only. Defaults to TRUE for safety." },

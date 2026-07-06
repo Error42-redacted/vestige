@@ -19,10 +19,16 @@ pub fn schema() -> serde_json::Value {
             },
             "min_similarity": {
                 "type": "number",
-                "description": "Minimum similarity for connection discovery (0.0-1.0, default: 0.5)",
+                "description": "FIXED similarity threshold for connection discovery (0.0-1.0). Passing this disables adaptive thresholding. Omit to let the dream self-calibrate to the batch's similarity distribution. Note: embedding pair similarities rarely exceed ~0.85, so fixed values above that connect nothing.",
                 "minimum": 0.0,
+                "maximum": 1.0
+            },
+            "keep_fraction": {
+                "type": "number",
+                "description": "Adaptive mode: fraction of memory pairs to keep as connections (0.01-1.0, default 0.10). Lower = sparser, sharper clusters. Ignored when min_similarity is set.",
+                "minimum": 0.01,
                 "maximum": 1.0,
-                "default": 0.5
+                "default": 0.10
             }
         }
     })
@@ -44,6 +50,11 @@ pub async fn execute(
         .and_then(|a| a.get("min_similarity"))
         .and_then(|v| v.as_f64())
         .map(|v| v.clamp(0.0, 1.0));
+    let keep_fraction = args
+        .as_ref()
+        .and_then(|a| a.get("keep_fraction"))
+        .and_then(|v| v.as_f64())
+        .map(|v| v.clamp(0.01, 1.0));
 
     // v1.9.0: Waking SWR tagging — preferential replay of tagged memories (70/30 split)
     let tagged_nodes = storage
@@ -106,24 +117,33 @@ pub async fn execute(
         })
         .collect();
 
+    // Explicit min_similarity switches to fixed-threshold mode; otherwise the
+    // dream self-calibrates (adaptive percentile cut, tunable via keep_fraction)
+    let mut config = vestige_core::DreamConfig::default();
+    if let Some(kf) = keep_fraction {
+        config.adaptive_keep_fraction = kf;
+    }
+    if let Some(ms) = min_similarity {
+        config.min_similarity = ms;
+        config.adaptive_threshold = false;
+    }
+    let adaptive_mode = config.adaptive_threshold;
+
     let cog = cognitive.lock().await;
-    let (dream_result, new_connections) = if let Some(min_similarity) = min_similarity {
-        let config = vestige_core::DreamConfig {
-            min_similarity,
-            ..vestige_core::DreamConfig::default()
-        };
-        cog.dreamer
-            .dream_with_config_and_connections(&dream_memories, config)
-            .await
-    } else {
-        cog.dreamer.dream_with_connections(&dream_memories).await
-    };
-    let insights = cog.dreamer.synthesize_insights(&dream_memories);
+    let (dream_result, new_connections) = cog
+        .dreamer
+        .dream_with_config_and_connections(&dream_memories, config)
+        .await;
     drop(cog);
+
+    // The dream already generated insights under the requested config —
+    // re-synthesizing here would both double the O(N^2) work and silently
+    // ignore the caller's threshold settings
+    let insights = &dream_result.insights_generated;
 
     // v2.1.0: Persist dream insights to database (Bug #4 fix)
     let mut insights_persisted = 0u64;
-    for insight in &insights {
+    for insight in insights {
         let record = InsightRecord {
             id: insight.id.clone(),
             insight: insight.insight.clone(),
@@ -251,6 +271,8 @@ pub async fn execute(
             "memories_compressed": dream_result.memories_compressed,
             "insights_generated": dream_result.insights_generated.len(),
             "duration_ms": dream_result.duration_ms,
+            "adaptive_threshold": adaptive_mode,
+            "effective_min_similarity": dream_result.stats.effective_min_similarity,
         }
     }))
 }
