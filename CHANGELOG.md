@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.3] - 2026-07-07 — "Bounded Hindsight"
+
+Local port of the backfill-safety fix from upstream v2.2.1 "Windows embeddings
++ backfill safety" (released 2026-07-02). NOTE: upstream's 2.2.1 collides with
+this fork's earlier local "[2.2.1] Hindsight, Corrected" below — they are
+different releases. This fork keeps its own numbering on top of the upstream
+2.2.0 baseline.
+
+### Fixed — Retroactive Salience Backfill: bounded promote + opt-out lever (upstream #103)
+
+Both backfill promote paths (the consolidation-pass auto-fire and the manual
+`backfill` tool) called `promote_memory`, whose SQL applies an **uncapped**
+`stability * 1.5` multiply — and a code comment wrongly claimed it was capped.
+On a chronically-recurring failure this could inflate a cause's stability
+without bound, distorting its review schedule. Both paths now call the new
+`promote_memory_backfill`, which bounds the promote to
+`MIN(stability * 1.5, stability + 365.0)` (the additive ceiling the backfill
+module already computed but never applied). Auto-fire remains **on by default**
+but is now disableable: set `VESTIGE_BACKFILL_AUTOFIRE=0` (or `false`/`off`/
+`no`); the manual `backfill` tool + CLI remain available regardless. Ported
+with upstream's three regression tests. Complements (does not replace) this
+fork's 2.2.1 attribution fix, which upstream still lacks.
+
+### Note — upstream #101 (Windows embeddings never initialized) needs no code port
+
+That fix is release-pipeline only: the official 2.2.0 Windows binary was built
+without the `vector-search` feature, compiling out embedding-on-write and
+semantic search. Local builds are unaffected as long as they use default
+features (or explicitly include `vector-search`). Do not reuse the old local
+recipe `--no-default-features --features embeddings,ort-download` — it
+reproduces the upstream bug; `Deploy-Vestige.ps1` documents the correct build.
+
 ## [2.2.2] - 2026-07-05 — "Lucid Dreaming"
 
 The dream becomes self-aware: instead of applying a fixed similarity cutoff,
