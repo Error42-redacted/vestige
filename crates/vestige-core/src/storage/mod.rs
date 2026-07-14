@@ -28,7 +28,7 @@ pub use portable::{
 pub use sqlite::{
     CompositionEventRecord, CompositionMemberRecord, CompositionNeighborRecord,
     CompositionOutcomeRecord, ConnectionRecord, ConnectorCursor, ConsolidationHistoryRecord,
-    DreamHistoryRecord, FilePortableSyncBackend, InsightRecord, IntentionRecord,
+    DeletionTombstone, DreamHistoryRecord, FilePortableSyncBackend, InsightRecord, IntentionRecord,
     NeverComposedCandidate, PortableSyncBackend, PortableSyncReport, ReconcileReport, Result,
     SmartIngestResult, SourceUpsertOutcome, SourceUpsertResult, SqliteMemoryStore,
     StateTransitionRecord, StorageError,

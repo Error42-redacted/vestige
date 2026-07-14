@@ -181,6 +181,7 @@ pub use storage::{
     ConnectionRecord,
     ConnectorCursor,
     ConsolidationHistoryRecord,
+    DeletionTombstone,
     Domain,
     DreamHistoryRecord,
     HealthStatus,

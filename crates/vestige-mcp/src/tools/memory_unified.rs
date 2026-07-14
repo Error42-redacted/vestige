@@ -178,12 +178,32 @@ async fn execute_get(storage: &Arc<Storage>, id: &str) -> Result<Value, String> 
                 "embeddingModel": n.embedding_model,
             }
         })),
-        None => Ok(serde_json::json!({
-            "action": "get",
-            "found": false,
-            "nodeId": id,
-            "message": "Memory not found",
-        })),
+        None => {
+            // v2.2.4: a purged (or auto-dedup-merged) memory leaves a
+            // content-free deletion tombstone — surface it instead of a bare
+            // "not found" so callers can tell "removed with audit trail"
+            // apart from "never existed".
+            if let Ok(Some(tombstone)) = storage.get_deletion_tombstone(id) {
+                return Ok(serde_json::json!({
+                    "action": "get",
+                    "found": false,
+                    "nodeId": id,
+                    "tombstone": {
+                        "deletedAt": tombstone.deleted_at,
+                        "reason": tombstone.reason,
+                        "nodeType": tombstone.node_type,
+                        "tags": tombstone.tags,
+                    },
+                    "message": "Memory purged; content and embeddings removed. Non-content tombstone retained for audit.",
+                }));
+            }
+            Ok(serde_json::json!({
+                "action": "get",
+                "found": false,
+                "nodeId": id,
+                "message": "Memory not found",
+            }))
+        }
     }
 }
 

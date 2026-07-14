@@ -843,6 +843,15 @@ pub async fn execute(
         );
     }
 
+    // v2.2.4 (additive): when the embedding service is not ready (async init
+    // during the first seconds of process life, failed init, or a build
+    // without embeddings), hybrid search silently falls back to keyword-only
+    // matching inside vestige-core. Surface that so clients can tell a
+    // degraded result set from a semantic one.
+    if !storage.is_embedding_ready() {
+        response["degraded"] = serde_json::json!("keyword-only");
+    }
+
     // Include associations if any were found
     if !associations.is_empty() {
         response["associations"] = serde_json::json!(associations);

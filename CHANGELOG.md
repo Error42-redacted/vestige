@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.4] - 2026-07-13 — "Consent to Consolidate"
+
+Auto-dedup is now opt-in (`VESTIGE_AUTO_DEDUP`) with node-type/provenance/date
+guards, tombstoned merges, and a configurable threshold; `recall` reports
+degraded keyword-only mode.
+
+Response to the 2026-07-14 auto-merge incident: the always-on
+`auto_dedup_consolidation` pass (consolidation step 4) merged 29 memory pairs
+at a hardcoded cosine threshold of 0.85 and **hard-deleted 27 records with no
+tombstone**, destroying topically-adjacent non-duplicates (e.g. the session
+close notes for 2026-07-12 and 2026-07-13, which even had different
+node_types).
+
+### Changed — auto-dedup is now opt-in and guarded
+
+- **Opt-in gate**: auto-dedup runs only when `VESTIGE_AUTO_DEDUP` is set to
+  `1`/`true`/`on`/`yes` (case-insensitive). Default is OFF; when disabled the
+  pass logs an info line and merges nothing. The gate lives inside
+  `auto_dedup_consolidation` itself, so every entry point into consolidation
+  (the periodic loop, the per-tool-call inline scheduler, the
+  `maintain`/`consolidate` tool, the dashboard button, and the CLI) is covered.
+- **Configurable threshold**: `VESTIGE_DEDUP_THRESHOLD` (f32, default **0.95**,
+  clamped to `0.85..=0.999`) replaces the hardcoded 0.85.
+- **Per-pair guards** (checked even when enabled) skip a merge when:
+  the two records' `node_type` differs; either content carries a
+  provenance/curation marker (`[restored 20`, `[split from `, `[split 20`,
+  `[merged]`, case-insensitive); or both contents lead (first 300 chars) with
+  a `YYYY-MM-DD` date and the dates differ.
+- **Tombstoned merges**: the merge loser is no longer row-deleted. After its
+  unique content is appended into the keeper, the loser goes through the same
+  mechanism as `purge` — content and embeddings removed, content-free audit
+  tombstone retained with reason `auto-dedup merged into <anchor-id>`.
+  `memory action=get` on a merged-away id now returns the tombstone (deletedAt,
+  reason, nodeType, tags) instead of a bare "Memory not found"; the same
+  applies to explicitly purged memories.
+- **Visibility**: skipping due to corpus size outside `2..=2000` is now logged
+  at warn (previously silent), and every actual merge is logged at info with
+  loser id, anchor id, and similarity.
+
+### Added — `recall` reports degraded keyword-only mode
+
+When the embedding service is not ready (async init during the first seconds
+of process life, failed init, or a build without embeddings), hybrid search
+silently falls back to keyword-only matching inside vestige-core. The `recall`
+response now carries an additive `"degraded": "keyword-only"` field in that
+window so clients can tell a degraded result set from a semantic one. No
+existing fields changed. (`smart_ingest` already reported its fallback in
+`reason` and is unchanged.)
+
+### Audit note — dream path
+
+`maintain {action:"dream"}` never merges or deletes memories (insight/
+connection synthesis only), and `advanced/compression.rs` — despite its own
+`similarity_threshold` — never persists anything: its output is discarded at
+the only call site (consolidation step 9). `auto_dedup_consolidation` was the
+sole destructive merge path, and it is the one now gated.
+
 ## [2.2.3] - 2026-07-07 — "Bounded Hindsight"
 
 Local port of the backfill-safety fix from upstream v2.2.1 "Windows embeddings

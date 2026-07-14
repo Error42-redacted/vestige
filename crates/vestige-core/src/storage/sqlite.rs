@@ -239,6 +239,23 @@ pub struct PurgeReport {
     pub children_orphaned: i64,
 }
 
+/// Content-free audit tombstone left behind by [`SqliteMemoryStore::purge_node`]
+/// (and, since v2.2.4, by auto-dedup merge losers). Carries no memory content.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletionTombstone {
+    /// Memory ID the tombstone stands in for.
+    pub memory_id: String,
+    /// RFC 3339 timestamp of the deletion, as recorded at purge time.
+    pub deleted_at: String,
+    /// Operator- or system-supplied reason (e.g. "auto-dedup merged into <id>").
+    pub reason: Option<String>,
+    /// node_type of the purged memory (non-content metadata kept for audit).
+    pub node_type: Option<String>,
+    /// Tags of the purged memory (non-content metadata kept for audit).
+    pub tags: Vec<String>,
+}
+
 // ============================================================================
 // STORAGE
 // ============================================================================
@@ -2429,6 +2446,43 @@ impl SqliteMemoryStore {
         })
     }
 
+    /// Fetch the content-free deletion tombstone for a memory id, if one
+    /// exists. Lets callers distinguish "purged/merged away (audit record
+    /// retained)" from "never existed".
+    pub fn get_deletion_tombstone(&self, id: &str) -> Result<Option<DeletionTombstone>> {
+        let reader = self
+            .reader
+            .lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let row = reader
+            .query_row(
+                "SELECT memory_id, deleted_at, reason, node_type, tags
+                 FROM deletion_tombstones WHERE memory_id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(
+            row.map(|(memory_id, deleted_at, reason, node_type, tags)| DeletionTombstone {
+                memory_id,
+                deleted_at,
+                reason,
+                node_type,
+                tags: tags
+                    .and_then(|t| serde_json::from_str(&t).ok())
+                    .unwrap_or_default(),
+            }),
+        )
+    }
+
     fn node_exists(conn: &Connection, id: &str) -> Result<bool> {
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM knowledge_nodes WHERE id = ?1",
@@ -3574,7 +3628,8 @@ impl SqliteMemoryStore {
     /// 1. Apply FSRS-6 decay with personalized w20
     /// 2. Promote emotional memories (synaptic tagging)
     /// 3. Generate missing embeddings
-    /// 4. Auto-dedup: merge similar memories (episodic → semantic)
+    /// 4. Auto-dedup: merge similar memories (episodic → semantic; opt-in via
+    ///    VESTIGE_AUTO_DEDUP since v2.2.4, see `auto_dedup_consolidation`)
     /// 5. Compute ACT-R base-level activations from access history
     /// 6. Prune old access log entries (keep 90 days)
     /// 7. Optimize w20 if enough usage data exists
@@ -3629,7 +3684,10 @@ impl SqliteMemoryStore {
         #[cfg(not(all(feature = "embeddings", feature = "vector-search")))]
         let embeddings_generated = 0i64;
 
-        // 4. Auto-dedup: merge similar memories (episodic → semantic consolidation)
+        // 4. Auto-dedup: merge similar memories (episodic → semantic
+        // consolidation). Opt-in since v2.2.4 (2026-07-14 incident): the gate,
+        // guards, and tombstoning all live inside auto_dedup_consolidation so
+        // every caller of run_consolidation is covered.
         #[cfg(all(feature = "embeddings", feature = "vector-search"))]
         let duplicates_merged = self.auto_dedup_consolidation().unwrap_or(0);
         #[cfg(not(all(feature = "embeddings", feature = "vector-search")))]
@@ -4007,20 +4065,157 @@ impl SqliteMemoryStore {
         })
     }
 
+    /// Parse the `VESTIGE_AUTO_DEDUP` opt-in gate. Default OFF — only an
+    /// explicit `1`/`true`/`on`/`yes` (case-insensitive, trimmed) enables the
+    /// destructive auto-merge. Everything else, including unset, disables it.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    fn auto_dedup_enabled(raw: Option<&str>) -> bool {
+        raw.map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            )
+        })
+        .unwrap_or(false)
+    }
+
+    /// Parse the `VESTIGE_DEDUP_THRESHOLD` cosine-similarity threshold.
+    /// Default 0.95; clamped to `0.85..=0.999` so it can never be looser than
+    /// the pre-incident hardcoded value.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    fn dedup_threshold(raw: Option<&str>) -> f32 {
+        raw.and_then(|s| s.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite())
+            .unwrap_or(0.95)
+            .clamp(0.85, 0.999)
+    }
+
+    /// Extract the first `YYYY-MM-DD` date in the first 300 chars of content
+    /// (the equivalent of regex `\d{4}-\d{2}-\d{2}`, hand-rolled to avoid a
+    /// new dependency).
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    fn dedup_first_date(content: &str) -> Option<&str> {
+        let window_end = content
+            .char_indices()
+            .nth(300)
+            .map(|(i, _)| i)
+            .unwrap_or(content.len());
+        let bytes = &content.as_bytes()[..window_end];
+        for start in 0..bytes.len().saturating_sub(9) {
+            if bytes[start..start + 4].iter().all(|b| b.is_ascii_digit())
+                && bytes[start + 4] == b'-'
+                && bytes[start + 5..start + 7]
+                    .iter()
+                    .all(|b| b.is_ascii_digit())
+                && bytes[start + 7] == b'-'
+                && bytes[start + 8..start + 10]
+                    .iter()
+                    .all(|b| b.is_ascii_digit())
+            {
+                return Some(&content[start..start + 10]);
+            }
+        }
+        None
+    }
+
+    /// Per-pair merge guards for auto-dedup (2026-07-14 incident hardening).
+    /// Returns `Some(reason)` when the pair must NOT be merged:
+    /// - different `node_type` (e.g. episodic session log vs semantic fact);
+    /// - either side carries a provenance/curation marker — those records were
+    ///   deliberately restored/split/merged by an operator and topical
+    ///   similarity is expected, not evidence of duplication;
+    /// - both sides lead with a `YYYY-MM-DD` date and the dates differ (the
+    ///   incident's exact failure: "session close 2026-07-12" merged into
+    ///   "session close 2026-07-13").
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    fn dedup_pair_guard(
+        a_type: &str,
+        a_content: &str,
+        b_type: &str,
+        b_content: &str,
+    ) -> Option<&'static str> {
+        if a_type != b_type {
+            return Some("node_type mismatch");
+        }
+
+        const PROVENANCE_MARKERS: [&str; 4] =
+            ["[restored 20", "[split from ", "[split 20", "[merged]"];
+        let a_lower = a_content.to_ascii_lowercase();
+        let b_lower = b_content.to_ascii_lowercase();
+        if PROVENANCE_MARKERS
+            .iter()
+            .any(|m| a_lower.contains(m) || b_lower.contains(m))
+        {
+            return Some("provenance/curation marker");
+        }
+
+        if let (Some(da), Some(db)) = (
+            Self::dedup_first_date(a_content),
+            Self::dedup_first_date(b_content),
+        ) && da != db
+        {
+            return Some("differing leading dates");
+        }
+
+        None
+    }
+
     /// Auto-deduplicate similar memories during consolidation (episodic → semantic merge)
     ///
-    /// Finds clusters with cosine similarity > 0.85, keeps the strongest node,
-    /// appends unique content from weaker nodes, and deletes duplicates.
+    /// OPT-IN since v2.2.4. On 2026-07-14 this pass (then always-on, hardcoded
+    /// threshold 0.85, hard `delete_node` on losers) merged 29 topically
+    /// adjacent but non-duplicate pairs and destroyed 27 records without a
+    /// tombstone. It is now:
+    /// - gated behind `VESTIGE_AUTO_DEDUP` (default OFF; see
+    ///   [`Self::auto_dedup_enabled`]);
+    /// - thresholded by `VESTIGE_DEDUP_THRESHOLD` (default 0.95, clamped to
+    ///   `0.85..=0.999`; see [`Self::dedup_threshold`]);
+    /// - guarded per pair by [`Self::dedup_pair_guard`] (node_type,
+    ///   provenance markers, leading dates);
+    /// - non-destructive on losers: after appending unique loser content into
+    ///   the keeper, the loser is tombstoned via [`Self::purge_node`] (content
+    ///   and embeddings removed, content-free audit tombstone retained with
+    ///   the keeper's id in the reason) instead of being row-deleted.
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
     fn auto_dedup_consolidation(&self) -> Result<i64> {
+        if !Self::auto_dedup_enabled(std::env::var("VESTIGE_AUTO_DEDUP").ok().as_deref()) {
+            tracing::info!("Auto-dedup skipped (VESTIGE_AUTO_DEDUP gate not enabled)");
+            return Ok(0);
+        }
+
         let all_embeddings = self.get_all_embeddings()?;
         let n = all_embeddings.len();
 
         if !(2..=2000).contains(&n) {
+            tracing::warn!(
+                corpus_size = n,
+                "Auto-dedup skipped: corpus size outside supported range (2..=2000)"
+            );
             return Ok(0);
         }
 
-        const SIMILARITY_THRESHOLD: f32 = 0.85;
+        let threshold =
+            Self::dedup_threshold(std::env::var("VESTIGE_DEDUP_THRESHOLD").ok().as_deref());
+
+        // Prefetch node_type + content for guard checks (corpus is <= 2000).
+        let meta: std::collections::HashMap<String, (String, String)> = {
+            let reader = self
+                .reader
+                .lock()
+                .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+            let mut stmt = reader.prepare("SELECT id, node_type, content FROM knowledge_nodes")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            rows.filter_map(|r| r.ok())
+                .map(|(id, node_type, content)| (id, (node_type, content)))
+                .collect()
+        };
+
         let mut merged_count = 0i64;
         let mut consumed: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -4028,6 +4223,10 @@ impl SqliteMemoryStore {
             if consumed.contains(&all_embeddings[i].0) {
                 continue;
             }
+
+            let Some((anchor_type, anchor_content)) = meta.get(&all_embeddings[i].0) else {
+                continue;
+            };
 
             let mut cluster: Vec<(usize, f32)> = Vec::new();
 
@@ -4039,9 +4238,25 @@ impl SqliteMemoryStore {
                     &all_embeddings[i].1,
                     &all_embeddings[j].1,
                 );
-                if sim >= SIMILARITY_THRESHOLD {
-                    cluster.push((j, sim));
+                if sim < threshold {
+                    continue;
                 }
+                let Some((cand_type, cand_content)) = meta.get(&all_embeddings[j].0) else {
+                    continue;
+                };
+                if let Some(reason) =
+                    Self::dedup_pair_guard(anchor_type, anchor_content, cand_type, cand_content)
+                {
+                    tracing::debug!(
+                        a = %all_embeddings[i].0,
+                        b = %all_embeddings[j].0,
+                        similarity = sim,
+                        reason,
+                        "Auto-dedup pair skipped by guard"
+                    );
+                    continue;
+                }
+                cluster.push((j, sim));
             }
 
             if cluster.is_empty() {
@@ -4064,8 +4279,9 @@ impl SqliteMemoryStore {
 
             let mut best_idx = i;
             let mut best_retention = anchor_retention;
+            let mut best_sim_to_anchor = 1.0_f32; // anchor's similarity to itself
 
-            for &(j, _) in &cluster {
+            for &(j, sim) in &cluster {
                 let dup_id = &all_embeddings[j].0;
                 let dup_retention: f64 = reader
                     .query_row(
@@ -4077,6 +4293,7 @@ impl SqliteMemoryStore {
                 if dup_retention > best_retention {
                     best_retention = dup_retention;
                     best_idx = j;
+                    best_sim_to_anchor = sim;
                 }
             }
 
@@ -4091,20 +4308,46 @@ impl SqliteMemoryStore {
                 )
                 .unwrap_or_default();
 
-            // Collect weak node IDs (all nodes in cluster except the keeper)
-            let mut weak_ids: Vec<String> = Vec::new();
+            // Collect weak nodes (all nodes in cluster except the keeper),
+            // remembering the clustering similarity for each.
+            let mut weak_ids: Vec<(String, f32)> = Vec::new();
             if best_idx != i {
-                weak_ids.push(anchor_id.clone());
+                weak_ids.push((anchor_id.clone(), best_sim_to_anchor));
             }
-            for &(j, _) in &cluster {
+            for &(j, sim) in &cluster {
                 if j != best_idx {
-                    weak_ids.push(all_embeddings[j].0.clone());
+                    weak_ids.push((all_embeddings[j].0.clone(), sim));
                 }
             }
 
+            // Defense in depth: similarity was measured against the cluster
+            // anchor, but the merge happens into the keeper — re-check the
+            // guards for each (keeper, loser) pair and drop violators.
+            let keeper_meta = meta.get(&best_id).cloned();
+            weak_ids.retain(|(weak_id, sim)| {
+                let (Some((k_type, k_content)), Some((w_type, w_content))) =
+                    (keeper_meta.as_ref(), meta.get(weak_id))
+                else {
+                    return false;
+                };
+                match Self::dedup_pair_guard(k_type, k_content, w_type, w_content) {
+                    Some(reason) => {
+                        tracing::debug!(
+                            keeper = %best_id,
+                            candidate = %weak_id,
+                            similarity = *sim,
+                            reason,
+                            "Auto-dedup keeper/loser pair skipped by guard"
+                        );
+                        false
+                    }
+                    None => true,
+                }
+            });
+
             // Merge unique content from weak nodes
             let mut merged_content = keeper_content.clone();
-            for weak_id in &weak_ids {
+            for (weak_id, _) in &weak_ids {
                 let weak_content: String = reader
                     .query_row(
                         "SELECT content FROM knowledge_nodes WHERE id = ?1",
@@ -4120,19 +4363,52 @@ impl SqliteMemoryStore {
                 }
             }
 
-            // Drop reader before taking writer locks in update/delete
+            // Drop reader before taking writer locks in update/purge
             drop(reader);
+
+            if weak_ids.is_empty() {
+                consumed.insert(best_id);
+                continue;
+            }
 
             // Update keeper with merged content
             if merged_content != keeper_content {
                 let _ = self.update_node_content(&best_id, &merged_content);
             }
 
-            // Delete weak nodes
-            for weak_id in &weak_ids {
-                let _ = self.delete_node(weak_id);
-                consumed.insert(weak_id.clone());
-                merged_count += 1;
+            // Tombstone weak nodes via the purge mechanism: content and
+            // embeddings are removed, but a content-free audit tombstone
+            // pointing at the keeper is retained (NOT a bare row deletion).
+            for (weak_id, sim) in &weak_ids {
+                let reason = format!("auto-dedup merged into {}", best_id);
+                match self.purge_node(weak_id, Some(&reason)) {
+                    Ok(report) if report.deleted => {
+                        tracing::info!(
+                            loser = %weak_id,
+                            anchor = %best_id,
+                            similarity = *sim,
+                            "Auto-dedup merged duplicate into anchor; loser tombstoned"
+                        );
+                        consumed.insert(weak_id.clone());
+                        merged_count += 1;
+                    }
+                    Ok(_) => {
+                        tracing::warn!(
+                            loser = %weak_id,
+                            anchor = %best_id,
+                            "Auto-dedup loser vanished before tombstoning"
+                        );
+                        consumed.insert(weak_id.clone());
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            loser = %weak_id,
+                            anchor = %best_id,
+                            "Auto-dedup failed to tombstone loser: {}",
+                            e
+                        );
+                    }
+                }
             }
 
             consumed.insert(best_id);
@@ -13381,5 +13657,355 @@ mod tests {
         assert!(!parse(Some("false")), "false is OFF");
         assert!(!parse(Some("OFF")), "OFF (case-insensitive) is OFF");
         assert!(!parse(Some(" no ")), "whitespace-padded no is OFF (trim)");
+    }
+
+    // ===================== Auto-dedup safety (v2.2.4) ====================
+    //
+    // 2026-07-14 incident: the always-on auto-dedup pass merged 29 pairs and
+    // hard-deleted 27 records with no tombstone. These tests pin the fix:
+    // opt-in gate, per-pair guards, and tombstoned (not deleted) losers.
+
+    /// Set (or remove, with `None`) an env var for the duration of `f`,
+    /// serialized on ENV_LOCK and restored afterwards even on panic.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    fn with_env_var<T>(key: &str, value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os(key);
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        let result = catch_unwind(AssertUnwindSafe(f));
+        unsafe {
+            if let Some(v) = previous {
+                std::env::set_var(key, v);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+        match result {
+            Ok(value) => value,
+            Err(payload) => resume_unwind(payload),
+        }
+    }
+
+    /// Ingest a node and plant a synthetic embedding for the active model so
+    /// auto-dedup's `get_all_embeddings()` sees it without a live embedder.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    fn ingest_with_embedding(
+        storage: &Storage,
+        content: &str,
+        node_type: &str,
+        vector: &[f32],
+    ) -> String {
+        let node = storage
+            .ingest(IngestInput {
+                content: content.to_string(),
+                node_type: node_type.to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        let model = storage.embedding_service.model_name();
+        let bytes = Embedding::new(vector.to_vec()).to_bytes();
+        let writer = storage.writer.lock().unwrap();
+        writer
+            .execute(
+                "INSERT OR REPLACE INTO node_embeddings
+                 (node_id, embedding, dimensions, model, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    &node.id,
+                    bytes,
+                    EMBEDDING_DIMENSIONS as i32,
+                    model,
+                    Utc::now().to_rfc3339()
+                ],
+            )
+            .unwrap();
+        writer
+            .execute(
+                "UPDATE knowledge_nodes SET has_embedding = 1, embedding_model = ?2 WHERE id = ?1",
+                params![&node.id, model],
+            )
+            .unwrap();
+        node.id
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn auto_dedup_gate_and_threshold_parsing() {
+        assert!(!Storage::auto_dedup_enabled(None), "unset must default OFF");
+        assert!(Storage::auto_dedup_enabled(Some("1")));
+        assert!(Storage::auto_dedup_enabled(Some("TRUE")));
+        assert!(Storage::auto_dedup_enabled(Some(" on ")), "trimmed");
+        assert!(Storage::auto_dedup_enabled(Some("Yes")));
+        assert!(!Storage::auto_dedup_enabled(Some("0")));
+        assert!(!Storage::auto_dedup_enabled(Some("off")));
+        assert!(
+            !Storage::auto_dedup_enabled(Some("enabled")),
+            "unrecognized values stay OFF"
+        );
+
+        assert_eq!(Storage::dedup_threshold(None), 0.95, "default 0.95");
+        assert_eq!(Storage::dedup_threshold(Some("0.97")), 0.97);
+        assert_eq!(
+            Storage::dedup_threshold(Some("0.5")),
+            0.85,
+            "clamped up to the old hardcoded floor"
+        );
+        assert_eq!(Storage::dedup_threshold(Some("1.5")), 0.999, "clamped down");
+        assert_eq!(Storage::dedup_threshold(Some("garbage")), 0.95);
+        assert_eq!(Storage::dedup_threshold(Some("NaN")), 0.95);
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn dedup_first_date_and_pair_guard() {
+        assert_eq!(
+            Storage::dedup_first_date("session close 2026-07-12 notes"),
+            Some("2026-07-12")
+        );
+        assert_eq!(Storage::dedup_first_date("no dates here"), None);
+        let beyond_window = format!("{}2026-07-12", "x".repeat(300));
+        assert_eq!(
+            Storage::dedup_first_date(&beyond_window),
+            None,
+            "date past the 300-char window is ignored"
+        );
+
+        assert_eq!(
+            Storage::dedup_pair_guard("fact", "abc", "insight", "abc"),
+            Some("node_type mismatch")
+        );
+        assert_eq!(
+            Storage::dedup_pair_guard("fact", "[RESTORED 2026-06-01] x", "fact", "y"),
+            Some("provenance/curation marker"),
+            "markers are case-insensitive and checked on either side"
+        );
+        assert_eq!(
+            Storage::dedup_pair_guard("fact", "a", "fact", "b [Split from abc123] c"),
+            Some("provenance/curation marker")
+        );
+        assert_eq!(
+            Storage::dedup_pair_guard("fact", "log 2026-07-12", "fact", "log 2026-07-13"),
+            Some("differing leading dates")
+        );
+        assert_eq!(
+            Storage::dedup_pair_guard("fact", "log 2026-07-12 a", "fact", "log 2026-07-12 b"),
+            None,
+            "matching dates do not block"
+        );
+        assert_eq!(
+            Storage::dedup_pair_guard("fact", "dated 2026-07-12", "fact", "undated"),
+            None,
+            "date guard needs a date on BOTH sides"
+        );
+        assert_eq!(Storage::dedup_pair_guard("fact", "plain", "fact", "text"), None);
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn auto_dedup_disabled_by_default_merges_nothing() {
+        with_env_var("VESTIGE_AUTO_DEDUP", None, || {
+            let storage = create_test_storage();
+            let v = vec![1.0_f32; EMBEDDING_DIMENSIONS];
+            let a = ingest_with_embedding(
+                &storage,
+                "cyclops port loader notes first variant",
+                "fact",
+                &v,
+            );
+            let b = ingest_with_embedding(
+                &storage,
+                "cyclops port loader notes second variant",
+                "fact",
+                &v,
+            );
+
+            let merged = storage.auto_dedup_consolidation().unwrap();
+
+            assert_eq!(merged, 0, "gate unset must merge nothing");
+            assert!(storage.get_node(&a).unwrap().is_some());
+            assert!(storage.get_node(&b).unwrap().is_some());
+            assert!(storage.get_deletion_tombstone(&a).unwrap().is_none());
+            assert!(storage.get_deletion_tombstone(&b).unwrap().is_none());
+        });
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn auto_dedup_enabled_merges_near_identical_and_tombstones_loser() {
+        with_env_var("VESTIGE_AUTO_DEDUP", Some("1"), || {
+            let storage = create_test_storage();
+            let v = vec![1.0_f32; EMBEDDING_DIMENSIONS];
+            let a = ingest_with_embedding(
+                &storage,
+                "cyclops docking clamps alignment procedure first pass",
+                "fact",
+                &v,
+            );
+            let b = ingest_with_embedding(
+                &storage,
+                "cyclops docking clamps alignment procedure second pass",
+                "fact",
+                &v,
+            );
+
+            let merged = storage.auto_dedup_consolidation().unwrap();
+            assert_eq!(merged, 1, "identical same-type pair must merge");
+
+            let a_live = storage.get_node(&a).unwrap();
+            let b_live = storage.get_node(&b).unwrap();
+            let (keeper_id, keeper_node, loser_id) = match (a_live, b_live) {
+                (Some(node), None) => (a.clone(), node, b.clone()),
+                (None, Some(node)) => (b.clone(), node, a.clone()),
+                _ => panic!("exactly one of the pair must survive the merge"),
+            };
+
+            assert!(
+                keeper_node.content.contains("[MERGED]"),
+                "keeper must absorb the loser's unique content"
+            );
+
+            // The loser is a tombstone — retrievable as an audit record with
+            // the keeper's id in the reason — not a bare row deletion.
+            let tombstone = storage
+                .get_deletion_tombstone(&loser_id)
+                .unwrap()
+                .expect("merge loser must leave a deletion tombstone");
+            assert_eq!(tombstone.memory_id, loser_id);
+            assert_eq!(
+                tombstone.reason.as_deref(),
+                Some(format!("auto-dedup merged into {}", keeper_id).as_str())
+            );
+            assert_eq!(tombstone.node_type.as_deref(), Some("fact"));
+        });
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn auto_dedup_skips_node_type_mismatch() {
+        with_env_var("VESTIGE_AUTO_DEDUP", Some("true"), || {
+            let storage = create_test_storage();
+            let v = vec![1.0_f32; EMBEDDING_DIMENSIONS];
+            let a = ingest_with_embedding(
+                &storage,
+                "ballast tank pressure behavior during descent",
+                "fact",
+                &v,
+            );
+            let b = ingest_with_embedding(
+                &storage,
+                "ballast tank pressure behavior during descent",
+                "insight",
+                &v,
+            );
+
+            let merged = storage.auto_dedup_consolidation().unwrap();
+
+            assert_eq!(merged, 0, "differing node_type must never merge");
+            assert!(storage.get_node(&a).unwrap().is_some());
+            assert!(storage.get_node(&b).unwrap().is_some());
+        });
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn auto_dedup_skips_provenance_markers() {
+        with_env_var("VESTIGE_AUTO_DEDUP", Some("on"), || {
+            let storage = create_test_storage();
+            let v = vec![1.0_f32; EMBEDDING_DIMENSIONS];
+            let a = ingest_with_embedding(
+                &storage,
+                "canonical memory about the cyclops ballast tanks",
+                "fact",
+                &v,
+            );
+            let b = ingest_with_embedding(
+                &storage,
+                "[Split from abc12345] cyclops ballast tanks continued notes",
+                "fact",
+                &v,
+            );
+
+            let merged = storage.auto_dedup_consolidation().unwrap();
+
+            assert_eq!(merged, 0, "curated/restored/split records must never merge");
+            assert!(storage.get_node(&a).unwrap().is_some());
+            assert!(storage.get_node(&b).unwrap().is_some());
+        });
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn auto_dedup_skips_differing_leading_dates() {
+        // Regression for the 2026-07-14 incident's exact failure shape:
+        // consecutive session-close records are topically near-identical but
+        // are distinct memories.
+        with_env_var("VESTIGE_AUTO_DEDUP", Some("yes"), || {
+            let storage = create_test_storage();
+            let v = vec![1.0_f32; EMBEDDING_DIMENSIONS];
+            let a = ingest_with_embedding(
+                &storage,
+                "session close 2026-07-12 wrapped up backfill attribution work",
+                "fact",
+                &v,
+            );
+            let b = ingest_with_embedding(
+                &storage,
+                "session close 2026-07-13 wrapped up dedup incident triage",
+                "fact",
+                &v,
+            );
+
+            let merged = storage.auto_dedup_consolidation().unwrap();
+
+            assert_eq!(merged, 0, "differing leading dates must never merge");
+            assert!(storage.get_node(&a).unwrap().is_some());
+            assert!(storage.get_node(&b).unwrap().is_some());
+        });
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn auto_dedup_loser_tombstone_is_distinguishable_from_never_existed() {
+        with_env_var("VESTIGE_AUTO_DEDUP", Some("1"), || {
+            let storage = create_test_storage();
+            let v = vec![0.5_f32; EMBEDDING_DIMENSIONS];
+            let a = ingest_with_embedding(
+                &storage,
+                "vehicle bay fabrication queue ordering rules",
+                "fact",
+                &v,
+            );
+            let b = ingest_with_embedding(
+                &storage,
+                "vehicle bay fabrication queue ordering rules again",
+                "fact",
+                &v,
+            );
+
+            let merged = storage.auto_dedup_consolidation().unwrap();
+            assert_eq!(merged, 1);
+
+            let loser = if storage.get_node(&a).unwrap().is_none() {
+                a
+            } else {
+                assert!(storage.get_node(&b).unwrap().is_none());
+                b
+            };
+
+            // Purged-tombstone semantics: the node row is gone, but the
+            // content-free audit record remains...
+            assert!(storage.get_node(&loser).unwrap().is_none());
+            assert!(storage.get_deletion_tombstone(&loser).unwrap().is_some());
+
+            // ...whereas an id that never existed has neither.
+            let ghost = "00000000-0000-0000-0000-000000000000";
+            assert!(storage.get_node(ghost).unwrap().is_none());
+            assert!(storage.get_deletion_tombstone(ghost).unwrap().is_none());
+        });
     }
 }
