@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.6] - 2026-07-16 — "Symmetric Undo"
+
+Live verification of 2.2.5 surfaced the one asymmetry left in the consent
+machinery: `dedup {action:'undo'}` on a supersede restored the bitemporal
+stamps but **not** the loser's FSRS state — the demote (−0.30 retrieval,
+−0.15 retention, ×0.5 stability) survived the undo, so reversing a wrongful
+supersession still required the manual promote-repair dance the whole v2.2.5
+effort existed to eliminate.
+
+### Changed — undo now restores the exact pre-supersede FSRS state
+
+- The supersede demote moved **inside `apply_plan`** (new `MergePlan.
+  demote_loser` flag, true for supersede plans): every mutation an operation
+  performs is now part of the recorded operation. `apply_plan` snapshots the
+  loser's `retrieval_strength` / `retention_strength` / `stability` /
+  `last_accessed` into the undo payload (`prev_fsrs`) before touching
+  anything, and `merge_undo` restores those **exact values** — a compensating
+  delta would be lossy because demote clamps at floors (`MAX(0.05, …)`).
+  Merge plans snapshot absorbed nodes the same way (future-proofing; merges
+  don't demote).
+- **Unified end-state now includes the dedup tool's `plan_supersede` +
+  `apply` path** (behavior change): it previously stamped without demoting;
+  now it demotes like every other supersede path — safe, because undo is
+  fully symmetric.
+- Undo of an operation recorded before 2.2.6 (no `prev_fsrs` in its payload)
+  restores stamps only, exactly as before; legacy persisted plans deserialize
+  with `demote_loser=false` and never start demoting retroactively.
+- Note: undo restores the snapshot state — any promote/demote/access applied
+  to the loser *between* apply and undo is overwritten by design ("as if the
+  supersede never happened").
+
 ## [2.2.5] - 2026-07-16 — "Consent to Supersede"
 
 `smart_ingest` no longer auto-supersedes on gate heuristics: it now **suggests**

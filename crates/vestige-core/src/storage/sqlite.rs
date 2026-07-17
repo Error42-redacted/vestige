@@ -9031,6 +9031,7 @@ impl SqliteMemoryStore {
                 },
                 member_ids.len() - 1
             ),
+            demote_loser: false,
         };
 
         self.persist_plan(&plan)?;
@@ -9078,25 +9079,28 @@ impl SqliteMemoryStore {
             classification,
             signals,
             explanation: format!(
-                "Supersede {old_id} with {new_id}. {old_id} is kept and remains queryable for audit, but stamped valid_until=now and superseded_by={new_id} (invalidate, don't delete)."
+                "Supersede {old_id} with {new_id}. {old_id} is kept and remains queryable for audit, but stamped valid_until=now and superseded_by={new_id} (invalidate, don't delete) and demoted (FSRS penalty; undo restores the exact pre-supersede state)."
             ),
+            demote_loser: true,
         };
 
         self.persist_plan(&plan)?;
         Ok(plan)
     }
 
-    /// v2.2.5 unified supersede end-state: demote the loser AND bitemporally
+    /// Unified supersede end-state: demote the loser AND bitemporally
     /// invalidate it (valid_until + superseded_by) via the plan/apply
-    /// machinery, recording a reversible [`crate::advanced::MergeOperation`]
-    /// so `dedup {action:'undo'}` restores the stamps. Every supersede path —
-    /// gated auto, explicit `smart_ingest {supersede}`, and `memory
-    /// {action:'supersede'}` — ends here, so the loser's end-state is
-    /// identical everywhere: demoted, stamped, still queryable for audit.
-    /// Refuses protected losers (via [`Self::plan_supersede`]).
+    /// machinery, recording a reversible [`crate::advanced::MergeOperation`].
+    /// Every supersede path — gated auto, explicit `smart_ingest
+    /// {supersede}`, and `memory {action:'supersede'}` — ends here, so the
+    /// loser's end-state is identical everywhere: demoted, stamped, still
+    /// queryable for audit. Refuses protected losers (via
+    /// [`Self::plan_supersede`]).
     ///
-    /// Note: undo restores the bitemporal stamps; the FSRS demotion is a soft
-    /// ranking penalty and is not reverted (use `memory {action:'promote'}`).
+    /// v2.2.6: the demote happens inside [`Self::apply_plan`] (via
+    /// `plan.demote_loser`), which snapshots the loser's pre-supersede FSRS
+    /// state in the operation's undo payload — so `dedup {action:'undo'}`
+    /// restores the stamps AND the exact FSRS state. Undo is fully symmetric.
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
     pub fn supersede_memory(
         &self,
@@ -9107,9 +9111,7 @@ impl SqliteMemoryStore {
         let plan = self.plan_supersede(loser_id, winner_id, policy)?;
         // Every caller of this helper is a consent surface: confirmation was
         // already given, so the classification gate is bypassed.
-        let op = self.apply_plan(&plan.id, true)?;
-        self.demote_memory(loser_id)?;
-        Ok(op)
+        self.apply_plan(&plan.id, true)
     }
 
     /// Cosine similarity between two nodes' stored embeddings (0 if missing).
@@ -9257,14 +9259,17 @@ impl SqliteMemoryStore {
                     serde_json::json!(survivor.tags),
                 );
 
-                // Capture prior valid_until / superseded_by of each absorbed node.
+                // Capture prior valid_until / superseded_by AND the mutable
+                // FSRS state of each absorbed node, so undo restores both.
                 let mut absorbed = Vec::new();
                 for id in &plan.invalidated_ids {
                     let (vu, sb) = self.read_bitemporal(id)?;
+                    let fsrs = self.read_fsrs_snapshot(id)?;
                     absorbed.push(serde_json::json!({
                         "id": id,
                         "prev_valid_until": vu,
                         "prev_superseded_by": sb,
+                        "prev_fsrs": fsrs,
                     }));
                 }
                 undo.insert("absorbed".into(), serde_json::json!(absorbed));
@@ -9278,15 +9283,23 @@ impl SqliteMemoryStore {
             PlanKind::Supersede => {
                 let old_id = &plan.member_ids[0];
                 let (vu, sb) = self.read_bitemporal(old_id)?;
+                let fsrs = self.read_fsrs_snapshot(old_id)?;
                 undo.insert(
                     "absorbed".into(),
                     serde_json::json!([{
                         "id": old_id,
                         "prev_valid_until": vu,
                         "prev_superseded_by": sb,
+                        "prev_fsrs": fsrs,
                     }]),
                 );
+                undo.insert("demoted".into(), serde_json::json!(plan.demote_loser));
                 self.invalidate_node(old_id, &plan.survivor_id, now)?;
+                // v2.2.6: the loser's FSRS demote is part of the recorded
+                // operation (snapshot above), so undo reverses it exactly.
+                if plan.demote_loser {
+                    self.demote_memory(old_id)?;
+                }
             }
         }
 
@@ -9331,8 +9344,11 @@ impl SqliteMemoryStore {
     }
 
     /// Reverse a prior merge/supersede operation by id (the "memory reflog").
-    /// Restores survivor content/tags and clears the bitemporal invalidation on
-    /// every node the operation touched, then records a compensating `undo` op.
+    /// Restores survivor content/tags, clears the bitemporal invalidation on
+    /// every node the operation touched, and (v2.2.6) restores each touched
+    /// node's exact pre-operation FSRS state — reversing the supersede demote
+    /// — then records a compensating `undo` op. Ops recorded before v2.2.6
+    /// carry no FSRS snapshot; their undo restores stamps only.
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
     pub fn merge_undo(&self, op_id: &str) -> Result<crate::advanced::MergeOperation> {
         let op = self
@@ -9392,6 +9408,19 @@ impl SqliteMemoryStore {
                 let prev_vu = entry.get("prev_valid_until").and_then(|v| v.as_str());
                 let prev_sb = entry.get("prev_superseded_by").and_then(|v| v.as_str());
                 self.restore_bitemporal(id, prev_vu, prev_sb)?;
+                // v2.2.6: restore the pre-operation FSRS state (reverses the
+                // supersede demote exactly). Legacy payloads without a
+                // snapshot skip this and behave as before.
+                if let Some(fsrs) = entry.get("prev_fsrs").and_then(|v| v.as_object())
+                    && let (Some(retrieval), Some(retention), Some(stability)) = (
+                        fsrs.get("retrieval_strength").and_then(|v| v.as_f64()),
+                        fsrs.get("retention_strength").and_then(|v| v.as_f64()),
+                        fsrs.get("stability").and_then(|v| v.as_f64()),
+                    )
+                {
+                    let last_accessed = fsrs.get("last_accessed").and_then(|v| v.as_str());
+                    self.restore_fsrs(id, retrieval, retention, stability, last_accessed)?;
+                }
             }
         }
 
@@ -9551,6 +9580,65 @@ impl SqliteMemoryStore {
              SET valid_until = ?1, superseded_by = ?2, updated_at = ?3
              WHERE id = ?4",
             params![valid_until, superseded_by, Utc::now().to_rfc3339(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Snapshot the mutable FSRS state of a node for an operation's undo
+    /// payload: retrieval/retention strength, stability, last_accessed.
+    /// These are exactly the fields `demote_memory` mutates; exact-value
+    /// restore (not a compensating delta) is required because demote clamps
+    /// at floors (`MAX(0.05, …)`), which makes deltas lossy.
+    fn read_fsrs_snapshot(&self, id: &str) -> Result<serde_json::Value> {
+        let reader = self
+            .reader
+            .lock()
+            .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
+        let res = reader
+            .query_row(
+                "SELECT retrieval_strength, retention_strength, stability, last_accessed
+                 FROM knowledge_nodes WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(serde_json::json!({
+                        "retrieval_strength": row.get::<_, f64>(0)?,
+                        "retention_strength": row.get::<_, f64>(1)?,
+                        "stability": row.get::<_, f64>(2)?,
+                        "last_accessed": row.get::<_, String>(3)?,
+                    }))
+                },
+            )
+            .optional()?;
+        res.ok_or_else(|| StorageError::NotFound(id.to_string()))
+    }
+
+    /// Restore a node's FSRS state from an undo-payload snapshot (exact
+    /// values, undoing any demote applied by the operation being reverted).
+    fn restore_fsrs(
+        &self,
+        id: &str,
+        retrieval: f64,
+        retention: f64,
+        stability: f64,
+        last_accessed: Option<&str>,
+    ) -> Result<()> {
+        let writer = self
+            .writer
+            .lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        writer.execute(
+            "UPDATE knowledge_nodes
+             SET retrieval_strength = ?1, retention_strength = ?2, stability = ?3,
+                 last_accessed = COALESCE(?4, last_accessed), updated_at = ?5
+             WHERE id = ?6",
+            params![
+                retrieval,
+                retention,
+                stability,
+                last_accessed,
+                Utc::now().to_rfc3339(),
+                id
+            ],
         )?;
         Ok(())
     }
@@ -14498,7 +14586,8 @@ mod tests {
 
     /// End-state test (follows test_supersede_invalidates_old_but_keeps_it_queryable):
     /// a confirmed supersede leaves the loser demoted AND stamped AND still
-    /// get_node-able; undo restores the stamps.
+    /// get_node-able; undo is fully symmetric (v2.2.6): stamps cleared AND
+    /// the exact pre-supersede FSRS state restored.
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
     #[test]
     fn supersede_memory_demotes_stamps_and_is_reversible() {
@@ -14532,11 +14621,170 @@ mod tests {
         assert_eq!(after.content, "LR should be 1e-4");
         assert!(storage.superseded_node_ids().unwrap().contains(&loser));
 
-        // Undo restores the stamps (demotion is a soft penalty, not reverted).
+        // Undo restores the stamps AND the exact pre-supersede FSRS state.
         storage.merge_undo(&op.id).unwrap();
         let (vu2, sb2) = storage.read_bitemporal(&loser).unwrap();
         assert!(vu2.is_none() && sb2.is_none(), "stamps cleared on undo");
         assert!(!storage.superseded_node_ids().unwrap().contains(&loser));
+        let restored = storage.get_node(&loser).unwrap().unwrap();
+        assert_eq!(
+            restored.retrieval_strength, before.retrieval_strength,
+            "undo must restore retrieval strength exactly"
+        );
+        assert_eq!(
+            restored.retention_strength, before.retention_strength,
+            "undo must restore retention strength exactly"
+        );
+        assert_eq!(
+            restored.stability, before.stability,
+            "undo must restore stability exactly"
+        );
+        assert_eq!(
+            restored.last_accessed, before.last_accessed,
+            "undo must restore last_accessed exactly"
+        );
+    }
+
+    /// Demote clamps at floors (`MAX(0.05, …)`), so a compensating-delta undo
+    /// would over-restore a node that was already weak. Exact snapshot restore
+    /// must bring back the true pre-supersede values.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn supersede_undo_restores_clamped_fsrs_exactly() {
+        let storage = create_test_storage();
+        let loser = seed_node(&storage, "weak old fact", &["w"], axis_vector(34, 0.02));
+        let winner = seed_node(
+            &storage,
+            "strong new fact",
+            &["w"],
+            axis_vector(34, 0.01),
+        );
+
+        // Push the loser near the demote floors before superseding.
+        {
+            let writer = storage.writer.lock().unwrap();
+            writer
+                .execute(
+                    "UPDATE knowledge_nodes
+                     SET retrieval_strength = 0.2, retention_strength = 0.15, stability = 0.8
+                     WHERE id = ?1",
+                    rusqlite::params![&loser],
+                )
+                .unwrap();
+        }
+
+        let op = storage.supersede_memory(&loser, &winner).unwrap();
+        let demoted = storage.get_node(&loser).unwrap().unwrap();
+        // Both strengths clamp at the 0.05 floor (0.2-0.3 and 0.15-0.15).
+        assert_eq!(demoted.retrieval_strength, 0.05, "retrieval clamped at floor");
+        assert_eq!(demoted.retention_strength, 0.05, "retention clamped at floor");
+        assert_eq!(demoted.stability, 0.4, "stability halved");
+
+        // A delta-based undo would yield 0.35/0.20 here. Snapshot restore
+        // must return the exact originals.
+        storage.merge_undo(&op.id).unwrap();
+        let restored = storage.get_node(&loser).unwrap().unwrap();
+        assert_eq!(restored.retrieval_strength, 0.2);
+        assert_eq!(restored.retention_strength, 0.15);
+        assert_eq!(restored.stability, 0.8);
+    }
+
+    /// v2.2.6 unified end-state: the dedup tool's plan_supersede + apply path
+    /// demotes the loser too (same end-state as the consent surfaces), and
+    /// undo fully restores it.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn dedup_plan_apply_supersede_demotes_and_undo_restores() {
+        let storage = create_test_storage();
+        let loser = seed_node(&storage, "old dedup fact", &["d"], axis_vector(35, 0.02));
+        let winner = seed_node(
+            &storage,
+            "new dedup fact",
+            &["d"],
+            axis_vector(35, 0.01),
+        );
+
+        let before = storage.get_node(&loser).unwrap().unwrap();
+        let policy = storage.get_merge_policy().unwrap_or_default();
+        let plan = storage.plan_supersede(&loser, &winner, policy).unwrap();
+        assert!(plan.demote_loser, "supersede plans carry demote_loser=true");
+        let op = storage.apply_plan(&plan.id, true).unwrap();
+
+        let after = storage.get_node(&loser).unwrap().unwrap();
+        assert!(
+            after.retrieval_strength < before.retrieval_strength,
+            "plan/apply supersede must demote like every other supersede path"
+        );
+        let (vu, _) = storage.read_bitemporal(&loser).unwrap();
+        assert!(vu.is_some(), "stamped");
+
+        storage.merge_undo(&op.id).unwrap();
+        let restored = storage.get_node(&loser).unwrap().unwrap();
+        assert_eq!(restored.retrieval_strength, before.retrieval_strength);
+        assert_eq!(restored.retention_strength, before.retention_strength);
+        assert_eq!(restored.stability, before.stability);
+        let (vu2, sb2) = storage.read_bitemporal(&loser).unwrap();
+        assert!(vu2.is_none() && sb2.is_none());
+    }
+
+    /// Operations recorded before v2.2.6 have no `prev_fsrs` snapshot in the
+    /// undo payload. Undo must still work (stamps restored) and must leave
+    /// FSRS state untouched rather than erroring or zeroing it.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn merge_undo_handles_legacy_payload_without_fsrs_snapshot() {
+        let storage = create_test_storage();
+        let loser = seed_node(&storage, "legacy loser", &["l"], axis_vector(36, 0.02));
+        let winner = seed_node(
+            &storage,
+            "legacy winner",
+            &["l"],
+            axis_vector(36, 0.01),
+        );
+
+        // Simulate a pre-v2.2.6 applied supersede: invalidate + hand-written
+        // operation row whose payload has no prev_fsrs.
+        storage
+            .invalidate_node(&loser, &winner, Utc::now())
+            .unwrap();
+        let op_id = uuid::Uuid::new_v4().to_string();
+        let payload = serde_json::json!({
+            "plan_id": null,
+            "kind": "supersede",
+            "survivor_id": winner,
+            "absorbed": [{
+                "id": loser,
+                "prev_valid_until": null,
+                "prev_superseded_by": null,
+            }],
+        });
+        {
+            let writer = storage.writer.lock().unwrap();
+            writer
+                .execute(
+                    "INSERT INTO merge_operations
+                        (id, plan_id, op_type, status, created_at, reverted_at, reverts_op_id,
+                         survivor_id, affected_ids, confidence, signals, reason, undo_payload)
+                     VALUES (?1, NULL, 'supersede', 'applied', ?2, NULL, NULL, ?3, ?4, NULL, NULL, 'legacy', ?5)",
+                    rusqlite::params![
+                        op_id,
+                        Utc::now().to_rfc3339(),
+                        winner,
+                        serde_json::to_string(&vec![winner.clone(), loser.clone()]).unwrap(),
+                        payload.to_string(),
+                    ],
+                )
+                .unwrap();
+        }
+
+        let before = storage.get_node(&loser).unwrap().unwrap();
+        storage.merge_undo(&op_id).unwrap();
+        let (vu, sb) = storage.read_bitemporal(&loser).unwrap();
+        assert!(vu.is_none() && sb.is_none(), "stamps cleared");
+        let after = storage.get_node(&loser).unwrap().unwrap();
+        assert_eq!(after.retrieval_strength, before.retrieval_strength);
+        assert_eq!(after.retention_strength, before.retention_strength);
+        assert_eq!(after.stability, before.stability);
     }
 
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]

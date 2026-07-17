@@ -70,7 +70,7 @@ pub fn schema() -> Value {
             },
             "winnerId": {
                 "type": "string",
-                "description": "For action='supersede': the memory that replaces 'id'. The loser ('id') is demoted and bitemporally stamped (valid_until + superseded_by); the operation is reversible via dedup undo."
+                "description": "For action='supersede': the memory that replaces 'id'. The loser ('id') is demoted and bitemporally stamped (valid_until + superseded_by); the operation is fully reversible via dedup undo (stamps and FSRS state restored)."
             }
         },
         "required": ["action"]
@@ -182,7 +182,7 @@ async fn execute_supersede(
             "winnerId": winner_id,
             "operationId": op.id,
             "message": format!(
-                "Memory {} superseded by {}: demoted + stamped valid_until/superseded_by, still queryable for audit. Reversible via dedup {{action:'undo', operation_id:'{}'}}.",
+                "Memory {} superseded by {}: demoted + stamped valid_until/superseded_by, still queryable for audit. Fully reversible via dedup {{action:'undo', operation_id:'{}'}} (restores stamps AND pre-supersede FSRS state).",
                 loser_id, winner_id, op.id
             ),
         }))

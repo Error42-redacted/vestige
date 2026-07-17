@@ -320,7 +320,7 @@ pub fn unified_schema() -> Value {
                 "description": "[plan_merge] IDs of memories to merge (>= 2). Survivor kept; rest bitemporally invalidated."
             },
             "survivor_id": { "type": "string", "description": "[plan_merge] Optional: which member to keep (defaults to highest-retention)." },
-            "old_id": { "type": "string", "description": "[plan_supersede] Memory being superseded (kept, marked invalid)." },
+            "old_id": { "type": "string", "description": "[plan_supersede] Memory being superseded (kept, marked invalid + demoted; undo fully restores)." },
             "new_id": { "type": "string", "description": "[plan_supersede] Memory that supersedes the old one." },
             "plan_id": { "type": "string", "description": "[apply] ID of a plan produced by plan_merge/plan_supersede." },
             "confirm": { "type": "boolean", "default": false, "description": "[apply] Required true for 'possible'/'non_match' plans." },

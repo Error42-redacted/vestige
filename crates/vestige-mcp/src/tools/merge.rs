@@ -72,7 +72,7 @@ pub fn plan_supersede_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "old_id": { "type": "string", "description": "Memory being superseded (kept, marked invalid)." },
+            "old_id": { "type": "string", "description": "Memory being superseded (kept, marked invalid + demoted; undo fully restores)." },
             "new_id": { "type": "string", "description": "Memory that supersedes the old one." }
         },
         "required": ["old_id", "new_id"]
@@ -393,7 +393,7 @@ fn merge_undo(storage: &Arc<Storage>, args: Option<Value>) -> Result<Value, Stri
                     "status": "reverted",
                     "affectedIds": op.affected_ids,
                     "reason": op.reason,
-                    "note": "The original operation was reversed: survivor content/tags restored and invalidation cleared. The plan is re-openable."
+                    "note": "The original operation was reversed: survivor content/tags restored, invalidation cleared, and each touched node's pre-operation FSRS state restored (supersede demotes are undone; pre-v2.2.6 operations have no FSRS snapshot and restore stamps only). The plan is re-openable."
                 }))
             }
             None => {

@@ -353,7 +353,7 @@ fn build_single_response(
         "create" => "Created new memory - content was different enough from existing memories",
         "update" => "Updated existing memory - content was similar to an existing memory",
         "reinforce" => "Reinforced existing memory - content was nearly identical",
-        "supersede" => "Superseded old memory - target demoted + stamped valid_until/superseded_by, reversible via dedup undo",
+        "supersede" => "Superseded old memory - target demoted + stamped valid_until/superseded_by, fully reversible via dedup undo (stamps and FSRS state restored)",
         "merge" => "Merged with related memories - content connects multiple topics",
         "replace" => "Replaced existing memory content entirely",
         "add_context" => "Added new content as context to existing memory",

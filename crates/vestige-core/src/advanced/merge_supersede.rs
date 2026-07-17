@@ -270,6 +270,14 @@ pub struct MergePlan {
     pub signals: MatchSignals,
     /// Human-readable explanation of what this plan does.
     pub explanation: String,
+    /// Whether applying this plan also demotes the invalidated node(s)
+    /// (FSRS penalty). True for supersede plans (v2.2.6 unified end-state:
+    /// demote + stamp happen inside `apply_plan`, so the operation's undo
+    /// payload snapshots the pre-demote FSRS state and undo restores it
+    /// exactly). Serde-defaults to false so legacy persisted plans keep
+    /// their original apply behavior.
+    #[serde(default)]
+    pub demote_loser: bool,
 }
 
 // ============================================================================
@@ -358,6 +366,37 @@ pub fn compose_merged_tags(member_tags: &[Vec<String>]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Plans persisted before v2.2.6 have no `demote_loser` field; they must
+    /// deserialize with it false (their apply never demoted, so a late apply
+    /// or undo must not start doing so).
+    #[test]
+    fn legacy_plan_json_defaults_demote_loser_to_false() {
+        let plan = MergePlan {
+            id: "p1".into(),
+            kind: PlanKind::Supersede,
+            survivor_id: "w".into(),
+            member_ids: vec!["l".into(), "w".into()],
+            result_content: "c".into(),
+            result_tags: vec![],
+            result_source: None,
+            invalidated_ids: vec!["l".into()],
+            confidence: 0.9,
+            classification: MatchClass::Match,
+            signals: MatchSignals {
+                embedding_similarity: 0.9,
+                tag_overlap: 0.5,
+                token_overlap: 0.5,
+                combined_score: 0.9,
+            },
+            explanation: "e".into(),
+            demote_loser: true,
+        };
+        let mut v: serde_json::Value = serde_json::to_value(&plan).unwrap();
+        v.as_object_mut().unwrap().remove("demote_loser");
+        let legacy: MergePlan = serde_json::from_value(v).unwrap();
+        assert!(!legacy.demote_loser, "legacy plans must not demote on apply");
+    }
 
     #[test]
     fn classify_three_zones() {
