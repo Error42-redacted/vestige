@@ -1,6 +1,6 @@
-[package]
+﻿[package]
 name = "vestige-core"
-version = "2.2.6"
+version = "2.2.7"
 edition = "2024"
 rust-version = "1.91"
 authors = ["Vestige Team"]
@@ -59,14 +59,14 @@ qwen3-reranker = ["qwen3-embeddings"]
 
 # External-source connectors (#57). The connector *contract*, normalization,
 # and content-hashing are always compiled (pure, no network). This feature adds
-# the network-backed reference connectors (GitHub Issues, …) via `reqwest`, so
+# the network-backed reference connectors (GitHub Issues, â€¦) via `reqwest`, so
 # the default local-first build never links an HTTP client.
 connectors = ["dep:reqwest"]
 
 # Hosted managed-sync backend (Vestige Cloud). Adds the HTTP `PortableSyncBackend`
 # (`HttpPortableSyncBackend`) that pull-merge-pushes the portable archive to a
 # hosted blob endpoint over HTTPS with a per-user sync key. Like `connectors`,
-# this is the ONLY thing that links an HTTP client — the default local-first
+# this is the ONLY thing that links an HTTP client â€” the default local-first
 # build stays network-free. Uses `reqwest`'s blocking client because the
 # `PortableSyncBackend` trait methods are synchronous.
 cloud-sync = ["dep:reqwest", "reqwest/blocking", "dep:chacha20poly1305", "dep:argon2"]
@@ -82,7 +82,7 @@ metal = ["fastembed/metal"]
 # Build: cargo build --release -p vestige-mcp --features qwen3-embeddings,cuda
 cuda = ["qwen3-embeddings", "candle-core/cuda"]
 
-# cuDNN on top of CUDA — additional fused kernels and faster inference paths.
+# cuDNN on top of CUDA â€” additional fused kernels and faster inference paths.
 cudnn = ["cuda", "candle-core/cudnn"]
 
 
@@ -131,7 +131,7 @@ candle-core = { version = "0.10.2", optional = true }
 # ============================================================================
 # OPTIONAL: Vector Search (USearch - HNSW, 20x faster than FAISS)
 # ============================================================================
-# Pinned to 2.23.0 — 2.24.0 introduced a Windows MSVC compile break because
+# Pinned to 2.23.0 â€” 2.24.0 introduced a Windows MSVC compile break because
 # its memory_mapping_allocator_gt template references the POSIX MAP_FAILED
 # macro from <sys/mman.h>, which doesn't exist on MSVC. Tracked upstream in
 # unum-cloud/usearch#746. Unpin when the upstream fix lands.
@@ -162,7 +162,7 @@ blake3 = "1"
 # ============================================================================
 # HTTP client for network-backed reference connectors (GitHub Issues, Redmine).
 # rustls so connectors build with no system OpenSSL dependency. Behind the
-# `connectors` feature — the default local-first build does not link reqwest.
+# `connectors` feature â€” the default local-first build does not link reqwest.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 
 # ============================================================================
@@ -170,7 +170,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # ============================================================================
 # XChaCha20-Poly1305 AEAD + Argon2id passphrase KDF. The archive is encrypted on
 # the client before upload, so the hosted service only ever stores ciphertext.
-# Behind the `cloud-sync` feature — the default local-first build links neither.
+# Behind the `cloud-sync` feature â€” the default local-first build links neither.
 chacha20poly1305 = { version = "0.10", optional = true }
 argon2 = { version = "0.5", optional = true }
 

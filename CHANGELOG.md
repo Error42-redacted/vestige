@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.7] - 2026-07-16 — "Know Thyself"
+
+The 2.2.5 and 2.2.6 deploys could only be verified by SHA-256 hashing the
+binary and grepping it for the version string, because no MCP surface
+reported the running server's version. Deploy verification is now one tool
+call.
+
+### Added — the running server reports its own version
+
+- `memory_status {view:"health"}` responses now include `serverVersion`
+  (from `CARGO_PKG_VERSION` at build time — single source of truth).
+- `session_start` responses include the same `serverVersion` field, and the
+  human-readable status line now reads
+  `**Status:** N memories | healthy | 100% embeddings | vestige-mcp 2.2.7`,
+  so every session start doubles as a deploy check.
+- No schema or behavior changes elsewhere; additive fields only.
+
 ## [2.2.6] - 2026-07-16 — "Symmetric Undo"
 
 Live verification of 2.2.5 surfaced the one asymmetry left in the consent

@@ -287,6 +287,9 @@ pub async fn execute_system_status(
 
     let mut response = serde_json::json!({
         "tool": "system_status",
+        // Identity — the running server's version, so deploys are verifiable
+        // over MCP instead of by hashing the binary (v2.2.7).
+        "serverVersion": env!("CARGO_PKG_VERSION"),
         // Health
         "status": status,
         "warnings": warnings,
@@ -762,6 +765,15 @@ mod tests {
         assert_eq!(value["totalMemories"], 0);
         assert!(value["warnings"].is_array());
         assert!(value["recommendations"].is_array());
+    }
+
+    #[tokio::test]
+    async fn test_system_status_reports_server_version() {
+        let (storage, _dir) = test_storage().await;
+        let value = execute_system_status(&storage, &test_cognitive(), None)
+            .await
+            .unwrap();
+        assert_eq!(value["serverVersion"], env!("CARGO_PKG_VERSION"));
     }
 
     #[tokio::test]

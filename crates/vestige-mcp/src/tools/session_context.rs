@@ -254,8 +254,11 @@ pub async fn execute(
             0.0
         };
         let status_line = format!(
-            "**Status:** {} memories | {} | {:.0}% embeddings",
-            stats.total_nodes, status, embedding_pct
+            "**Status:** {} memories | {} | {:.0}% embeddings | vestige-mcp {}",
+            stats.total_nodes,
+            status,
+            embedding_pct,
+            env!("CARGO_PKG_VERSION")
         );
         let status_len = status_line.len() + 1;
         if char_count + status_len <= budget_chars {
@@ -397,6 +400,7 @@ pub async fn execute(
 
     Ok(serde_json::json!({
         "context": context_text,
+        "serverVersion": env!("CARGO_PKG_VERSION"),
         "profile": output_config.profile.as_str(),
         "tokensUsed": tokens_used,
         "tokenBudget": token_budget,
@@ -554,6 +558,19 @@ mod tests {
         assert_eq!(value["tokenBudget"], 1000);
         assert!(value["expandable"].is_array());
         assert!(value["automationTriggers"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_reports_server_version() {
+        let (storage, _dir) = test_storage().await;
+        let result = execute(&storage, &test_cognitive(), &OutputConfig::default(), None).await;
+        let value = result.unwrap();
+        assert_eq!(value["serverVersion"], env!("CARGO_PKG_VERSION"));
+        let ctx = value["context"].as_str().unwrap();
+        assert!(
+            ctx.contains(&format!("vestige-mcp {}", env!("CARGO_PKG_VERSION"))),
+            "status line should carry the running server version"
+        );
     }
 
     #[tokio::test]
