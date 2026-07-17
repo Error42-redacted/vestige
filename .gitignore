@@ -2,6 +2,9 @@
 # Rust
 # =============================================================================
 target/
+# Isolated release-build dir (v2.2.5+): keeps cargo away from target/release
+# while the deployed exe there is running. See CARGO_TARGET_DIR in docs.
+target-v225/
 **/*.rs.bk
 *.pdb
 
