@@ -95,6 +95,90 @@ pub struct SmartIngestResult {
     /// Full updated content after a merge/append/context write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_preview: Option<String>,
+    /// v2.2.5: gate proposed a supersession but consent mode withheld it —
+    /// confirm with `smart_ingest {supersede: "<id>"}` or
+    /// `memory {action:'supersede'}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersede_candidate: Option<SupersedeCandidate>,
+    /// v2.2.5: gate proposed a merge-append but consent mode withheld it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_candidate: Option<MergeCandidateInfo>,
+}
+
+/// A withheld gate supersession proposal (v2.2.5 "Consent to Supersede").
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupersedeCandidate {
+    /// Id of the existing memory the gate proposed to supersede.
+    pub id: String,
+    /// Cosine similarity between the new content and the target.
+    pub similarity: f32,
+    /// ~200-char preview of the target's content.
+    pub content_preview: String,
+    /// The target's node_type.
+    pub node_type: String,
+    /// Whether the pair would pass [`SqliteMemoryStore::supersede_guard`]
+    /// (i.e. whether `VESTIGE_SUPERSEDE_MODE=auto` would have acted on it).
+    pub would_pass_guards: bool,
+    /// Guard reason when `would_pass_guards` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_reason: Option<String>,
+    /// The gate's supersede reason (e.g. "Correction", "Improvement").
+    pub supersede_reason: String,
+}
+
+/// A withheld gate merge-append proposal (v2.2.5 "Consent to Supersede").
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeCandidateInfo {
+    /// Id of the existing memory the gate proposed to append into.
+    pub id: String,
+    /// Cosine similarity between the new content and the target.
+    pub similarity: f32,
+    /// ~200-char preview of the target's current content.
+    pub content_preview: String,
+    /// What the target's content WOULD become if the append were confirmed.
+    pub merge_preview: String,
+}
+
+/// Consent mode for smart_ingest's gate-driven supersede/merge actions
+/// (v2.2.5 "Consent to Supersede"). Parsed from `VESTIGE_SUPERSEDE_MODE` /
+/// `VESTIGE_MERGE_MODE` per call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupersedeMode {
+    /// Never act on the gate's proposal; plain create, proposal noted in `reason`.
+    Off,
+    /// Create the new memory and attach a candidate for explicit confirm (default).
+    Suggest,
+    /// Act on the proposal automatically (supersede: guarded; merge: legacy append).
+    Auto,
+}
+
+/// The Update/Merge silent-append branch shares the same three consent modes.
+pub type MergeMode = SupersedeMode;
+
+/// Final action for a gate-driven Supersede decision after consent remap.
+#[cfg(all(feature = "embeddings", feature = "vector-search"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupersedeAction {
+    /// Plain create (consent mode off).
+    Create,
+    /// Create new memory + attach a `supersede_candidate` suggestion.
+    Suggest,
+    /// Enriched supersede: demote + bitemporal stamp + reversible operation.
+    Supersede,
+}
+
+/// Final action for a gate-driven Update/Merge decision after consent remap.
+#[cfg(all(feature = "embeddings", feature = "vector-search"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeAction {
+    /// Plain create (consent mode off).
+    Create,
+    /// Create new memory + attach a `merge_candidate` suggestion.
+    Suggest,
+    /// Legacy pre-2.2.5 behavior: silently append into the existing memory.
+    Append,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -412,6 +496,8 @@ impl SqliteMemoryStore {
             previous_content: None,
             merged_from: None,
             merge_preview: None,
+            supersede_candidate: None,
+            merge_candidate: None,
         })
     }
 
@@ -805,9 +891,114 @@ impl SqliteMemoryStore {
         input: IngestInput,
         excluded_node_ids: &[String],
     ) -> Result<SmartIngestResult> {
+        self.smart_ingest_with_options(input, excluded_node_ids, None)
+    }
+
+    /// Smart ingest with exclusions and optional explicit supersede consent
+    /// (v2.2.5 "Consent to Supersede").
+    ///
+    /// `explicit_supersede` is the caller-confirmed id of a memory the new
+    /// content replaces. It is honored in every `VESTIGE_SUPERSEDE_MODE`
+    /// (including `off`) and even when the embedding service is down, and it
+    /// bypasses the node_type/handoff guards — explicit consent outranks
+    /// structural heuristics — but a `protected` target is always refused,
+    /// matching [`Self::plan_supersede`].
+    ///
+    /// Without it, gate-driven Supersede and Update/Merge decisions are
+    /// remapped through the consent modes (`VESTIGE_SUPERSEDE_MODE` /
+    /// `VESTIGE_MERGE_MODE`, both default `suggest`): the pre-2.2.5 automatic
+    /// behavior only runs under `auto`, and auto-supersede additionally passes
+    /// [`Self::supersede_guard`].
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    pub fn smart_ingest_with_options(
+        &self,
+        input: IngestInput,
+        excluded_node_ids: &[String],
+        explicit_supersede: Option<&str>,
+    ) -> Result<SmartIngestResult> {
         use crate::advanced::prediction_error::{
-            CandidateMemory, GateDecision, PredictionErrorGate, UpdateType,
+            CandidateMemory, EvaluationIntent, GateDecision, PredictionErrorGate, SupersedeReason,
+            UpdateType,
         };
+
+        // --------------------------------------------------------------
+        // Explicit consent path: the caller already confirmed the target.
+        // --------------------------------------------------------------
+        if let Some(target_id) = explicit_supersede {
+            let target = self
+                .get_node(target_id)?
+                .ok_or_else(|| StorageError::NotFound(target_id.to_string()))?;
+            // Refuse BEFORE ingesting so a refusal creates nothing.
+            if self.is_protected(target_id)? {
+                return Err(StorageError::Init(format!(
+                    "Memory {target_id} is protected and cannot be superseded. Unprotect it first."
+                )));
+            }
+
+            // Similarity for the response via the gate's explicit-intent hook
+            // (skipped when the embedding service is not ready — the
+            // supersession itself never depends on embeddings).
+            let similarity = if self.embedding_service.is_ready() {
+                match self.embedding_service.embed(&input.content) {
+                    Ok(new_embedding) => {
+                        let embedding =
+                            self.get_node_embedding(target_id)?.unwrap_or_default();
+                        let candidate = CandidateMemory {
+                            id: target.id.clone(),
+                            content: target.content.clone(),
+                            embedding,
+                            retrieval_strength: target.retrieval_strength,
+                            retention_strength: target.retention_strength,
+                            tags: target.tags.clone(),
+                            source: target.source.clone(),
+                            was_demoted: target.retrieval_strength < 0.3,
+                            was_promoted: target.retrieval_strength > 0.85,
+                        };
+                        let mut gate = PredictionErrorGate::new();
+                        match gate.evaluate_with_intent(
+                            &input.content,
+                            &new_embedding.vector,
+                            std::slice::from_ref(&candidate),
+                            EvaluationIntent::Supersede {
+                                old_memory_id: target_id.to_string(),
+                                reason: SupersedeReason::UserIndicated,
+                            },
+                        ) {
+                            GateDecision::Supersede { similarity, .. } => Some(similarity),
+                            _ => None,
+                        }
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+
+            let node = self.ingest(input)?;
+            let op = self.supersede_memory(target_id, &node.id)?;
+            return Ok(SmartIngestResult {
+                decision: "supersede".to_string(),
+                node,
+                superseded_id: Some(target_id.to_string()),
+                similarity,
+                prediction_error: similarity.map(|s| 1.0 - s),
+                reason: format!(
+                    "Explicit supersede confirmed: {target_id} demoted and stamped (valid_until + superseded_by), still queryable for audit. Reversible via dedup undo (operation {}).",
+                    op.id
+                ),
+                previous_content: None,
+                merged_from: None,
+                merge_preview: None,
+                supersede_candidate: None,
+                merge_candidate: None,
+            });
+        }
+
+        // Consent modes for gate-driven actions. Read per call (like the
+        // auto-dedup gate) so changing them needs no server restart.
+        let supersede_mode =
+            Self::supersede_mode(std::env::var("VESTIGE_SUPERSEDE_MODE").ok().as_deref());
+        let merge_mode = Self::merge_mode(std::env::var("VESTIGE_MERGE_MODE").ok().as_deref());
 
         // Generate embedding for new content
         if !self.embedding_service.is_ready() {
@@ -832,8 +1023,12 @@ impl SqliteMemoryStore {
         // Find similar memories using semantic search
         let similar = self.semantic_search_raw(&input.content, 10)?;
 
-        // Build candidate memories
+        // Build candidate memories. `CandidateMemory` has no node_type field,
+        // so retain a side map for the supersede guard (zero extra queries —
+        // the node is already in hand here).
         let mut candidates: Vec<CandidateMemory> = Vec::new();
+        let mut candidate_types: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for (node_id, _similarity) in similar.iter() {
             if excluded_node_ids.iter().any(|id| id == node_id) {
                 continue;
@@ -845,6 +1040,7 @@ impl SqliteMemoryStore {
                     let was_demoted = node.retrieval_strength < 0.3;
                     let was_promoted = node.retrieval_strength > 0.85;
 
+                    candidate_types.insert(node.id.clone(), node.node_type.clone());
                     candidates.push(CandidateMemory {
                         id: node.id.clone(),
                         content: node.content.clone(),
@@ -890,6 +1086,8 @@ impl SqliteMemoryStore {
                     previous_content: None,
                     merged_from: None,
                     merge_preview: None,
+                    supersede_candidate: None,
+                    merge_candidate: None,
                 })
             }
             GateDecision::Update {
@@ -916,40 +1114,19 @@ impl SqliteMemoryStore {
                             previous_content: None,
                             merged_from: None,
                             merge_preview: None,
+                            supersede_candidate: None,
+                            merge_candidate: None,
                         })
                     }
                     UpdateType::Merge | UpdateType::Append => {
-                        // Update the existing memory with merged content
-                        let existing = self
-                            .get_node(&target_id)?
-                            .ok_or_else(|| StorageError::NotFound(target_id.clone()))?;
-                        let previous_content = existing.content.clone();
-
-                        let merged_content = format!(
-                            "{}\n\n[Updated {}]\n{}",
-                            previous_content,
-                            chrono::Utc::now().format("%Y-%m-%d"),
-                            input.content
-                        );
-
-                        self.update_node_content(&target_id, &merged_content)?;
-                        self.strengthen_on_access(&target_id)?;
-
-                        let node = self
-                            .get_node(&target_id)?
-                            .ok_or_else(|| StorageError::NotFound(target_id.clone()))?;
-
-                        Ok(SmartIngestResult {
-                            decision: "update".to_string(),
-                            node,
-                            superseded_id: None,
-                            similarity: Some(similarity),
-                            prediction_error: Some(prediction_error),
-                            reason: "Merged with existing similar memory".to_string(),
-                            previous_content: Some(previous_content),
-                            merged_from: Some(target_id),
-                            merge_preview: Some(merged_content),
-                        })
+                        // v2.2.5: the silent-append branch is consent-gated.
+                        self.apply_merge_decision(
+                            input,
+                            &target_id,
+                            similarity,
+                            prediction_error,
+                            merge_mode,
+                        )
                     }
                     UpdateType::Replace => {
                         // Replace content entirely
@@ -973,6 +1150,8 @@ impl SqliteMemoryStore {
                             previous_content: Some(previous_content),
                             merged_from: Some(target_id),
                             merge_preview: Some(input.content),
+                            supersede_candidate: None,
+                            merge_candidate: None,
                         })
                     }
                     UpdateType::AddContext => {
@@ -1000,6 +1179,8 @@ impl SqliteMemoryStore {
                             previous_content: Some(previous_content),
                             merged_from: Some(target_id),
                             merge_preview: Some(merged_content),
+                            supersede_candidate: None,
+                            merge_candidate: None,
                         })
                     }
                 }
@@ -1010,23 +1191,30 @@ impl SqliteMemoryStore {
                 supersede_reason,
                 prediction_error,
             } => {
-                // Demote the old memory and create new
-                self.demote_memory(&old_memory_id)?;
-
-                // Create the new improved memory
-                let node = self.ingest(input)?;
-
-                Ok(SmartIngestResult {
-                    decision: "supersede".to_string(),
-                    node,
-                    superseded_id: Some(old_memory_id),
-                    similarity: Some(similarity),
-                    prediction_error: Some(prediction_error),
-                    reason: format!("New memory supersedes old: {:?}", supersede_reason),
-                    previous_content: None,
-                    merged_from: None,
-                    merge_preview: None,
-                })
+                // v2.2.5: gate-driven supersession is consent-gated. The gate
+                // keys on shared-vocabulary keyword heuristics that fix-notes
+                // and handoffs trip constantly (8 of 9 observed firings on
+                // 2026-07-14/15 hit the WRONG memory at similarity 0.74-0.86).
+                let (target_content, target_tags) = candidates
+                    .iter()
+                    .find(|c| c.id == old_memory_id)
+                    .map(|c| (c.content.clone(), c.tags.clone()))
+                    .unwrap_or_default();
+                let target_type = candidate_types
+                    .get(&old_memory_id)
+                    .cloned()
+                    .unwrap_or_default();
+                self.apply_supersede_decision(
+                    input,
+                    &old_memory_id,
+                    similarity,
+                    prediction_error,
+                    supersede_reason,
+                    &target_type,
+                    &target_content,
+                    &target_tags,
+                    supersede_mode,
+                )
             }
             GateDecision::Merge {
                 memory_ids,
@@ -1050,6 +1238,220 @@ impl SqliteMemoryStore {
                     previous_content: None,
                     merged_from: None,
                     merge_preview: None,
+                    supersede_candidate: None,
+                    merge_candidate: None,
+                })
+            }
+        }
+    }
+
+    /// Execute the gate's Supersede decision under the consent mode (v2.2.5).
+    ///
+    /// - `Off`: plain create; the withheld proposal is reported in `reason`.
+    /// - `Suggest` (default): create the new memory and attach a
+    ///   `supersede_candidate` for explicit confirm via
+    ///   `smart_ingest {supersede: "<id>"}` or `memory {action:'supersede'}`.
+    /// - `Auto`: run [`Self::supersede_guard`]; a guard hit downgrades to the
+    ///   Suggest behavior (logged at info), a pass runs the enriched supersede
+    ///   ([`Self::supersede_memory`]: demote + bitemporal stamp + reversible
+    ///   operation).
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[allow(clippy::too_many_arguments)] // decision fields + guard inputs; all required
+    fn apply_supersede_decision(
+        &self,
+        input: IngestInput,
+        old_memory_id: &str,
+        similarity: f32,
+        prediction_error: f32,
+        supersede_reason: crate::advanced::prediction_error::SupersedeReason,
+        target_type: &str,
+        target_content: &str,
+        target_tags: &[String],
+        mode: SupersedeMode,
+    ) -> Result<SmartIngestResult> {
+        use crate::advanced::prediction_error::{SupersedeReason, detect_contradiction};
+
+        let target_protected = self.is_protected(old_memory_id).unwrap_or(false);
+        let appears_contradictory = detect_contradiction(&input.content, target_content);
+        let demoted_branch = supersede_reason == SupersedeReason::Improvement;
+        let guard_reason = Self::supersede_guard(
+            &input.node_type,
+            &input.tags,
+            target_type,
+            target_tags,
+            target_protected,
+            demoted_branch,
+            appears_contradictory,
+        );
+
+        if mode == SupersedeMode::Auto && guard_reason.is_some() {
+            tracing::info!(
+                target_id = old_memory_id,
+                guard = guard_reason.unwrap_or_default(),
+                similarity,
+                "auto-supersede blocked by guard; downgraded to suggestion"
+            );
+        }
+
+        match Self::remap_supersede_decision(mode, guard_reason) {
+            SupersedeAction::Create => {
+                let node = self.ingest(input)?;
+                Ok(SmartIngestResult {
+                    decision: "create".to_string(),
+                    node,
+                    superseded_id: None,
+                    similarity: Some(similarity),
+                    prediction_error: Some(prediction_error),
+                    reason: format!(
+                        "Created new memory (VESTIGE_SUPERSEDE_MODE=off): gate proposed superseding {old_memory_id} ({supersede_reason:?}) but was not acted on"
+                    ),
+                    previous_content: None,
+                    merged_from: None,
+                    merge_preview: None,
+                    supersede_candidate: None,
+                    merge_candidate: None,
+                })
+            }
+            SupersedeAction::Suggest => {
+                let node = self.ingest(input)?;
+                Ok(SmartIngestResult {
+                    decision: "create".to_string(),
+                    node,
+                    superseded_id: None,
+                    similarity: Some(similarity),
+                    prediction_error: Some(prediction_error),
+                    reason: format!(
+                        "Created new memory; similar memory found — pass supersede=\"{old_memory_id}\" to smart_ingest (or memory action='supersede') to confirm supersession"
+                    ),
+                    previous_content: None,
+                    merged_from: None,
+                    merge_preview: None,
+                    supersede_candidate: Some(SupersedeCandidate {
+                        id: old_memory_id.to_string(),
+                        similarity,
+                        content_preview: preview(target_content, 200),
+                        node_type: target_type.to_string(),
+                        would_pass_guards: guard_reason.is_none(),
+                        guard_reason: guard_reason.map(str::to_string),
+                        supersede_reason: format!("{supersede_reason:?}"),
+                    }),
+                    merge_candidate: None,
+                })
+            }
+            SupersedeAction::Supersede => {
+                let node = self.ingest(input)?;
+                let op = self.supersede_memory(old_memory_id, &node.id)?;
+                Ok(SmartIngestResult {
+                    decision: "supersede".to_string(),
+                    node,
+                    superseded_id: Some(old_memory_id.to_string()),
+                    similarity: Some(similarity),
+                    prediction_error: Some(prediction_error),
+                    reason: format!(
+                        "New memory supersedes old ({supersede_reason:?}, VESTIGE_SUPERSEDE_MODE=auto): {old_memory_id} demoted + stamped valid_until/superseded_by, reversible via dedup undo (operation {})",
+                        op.id
+                    ),
+                    previous_content: None,
+                    merged_from: None,
+                    merge_preview: None,
+                    supersede_candidate: None,
+                    merge_candidate: None,
+                })
+            }
+        }
+    }
+
+    /// Execute the gate's Update/Merge (append) decision under the consent
+    /// mode from `VESTIGE_MERGE_MODE` (v2.2.5).
+    ///
+    /// - `Off`: plain create; the withheld proposal is reported in `reason`.
+    /// - `Suggest` (default): create the new memory and attach a
+    ///   `merge_candidate` (confirm by combining via dedup plan_merge/apply).
+    /// - `Auto`: legacy pre-2.2.5 behavior — silently append the new content
+    ///   into the existing similar memory.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    fn apply_merge_decision(
+        &self,
+        input: IngestInput,
+        target_id: &str,
+        similarity: f32,
+        prediction_error: f32,
+        mode: MergeMode,
+    ) -> Result<SmartIngestResult> {
+        let existing = self
+            .get_node(target_id)?
+            .ok_or_else(|| StorageError::NotFound(target_id.to_string()))?;
+        let previous_content = existing.content.clone();
+        let merged_content = format!(
+            "{}\n\n[Updated {}]\n{}",
+            previous_content,
+            chrono::Utc::now().format("%Y-%m-%d"),
+            input.content
+        );
+
+        match Self::remap_merge_decision(mode) {
+            MergeAction::Append => {
+                // Legacy behavior: append into the existing memory.
+                self.update_node_content(target_id, &merged_content)?;
+                self.strengthen_on_access(target_id)?;
+
+                let node = self
+                    .get_node(target_id)?
+                    .ok_or_else(|| StorageError::NotFound(target_id.to_string()))?;
+
+                Ok(SmartIngestResult {
+                    decision: "update".to_string(),
+                    node,
+                    superseded_id: None,
+                    similarity: Some(similarity),
+                    prediction_error: Some(prediction_error),
+                    reason: "Merged with existing similar memory".to_string(),
+                    previous_content: Some(previous_content),
+                    merged_from: Some(target_id.to_string()),
+                    merge_preview: Some(merged_content),
+                    supersede_candidate: None,
+                    merge_candidate: None,
+                })
+            }
+            MergeAction::Suggest => {
+                let node = self.ingest(input)?;
+                Ok(SmartIngestResult {
+                    decision: "create".to_string(),
+                    node,
+                    superseded_id: None,
+                    similarity: Some(similarity),
+                    prediction_error: Some(prediction_error),
+                    reason: format!(
+                        "Created new memory; similar memory found — see mergeCandidate (confirm by combining {target_id} via dedup plan_merge/apply)"
+                    ),
+                    previous_content: None,
+                    merged_from: None,
+                    merge_preview: None,
+                    supersede_candidate: None,
+                    merge_candidate: Some(MergeCandidateInfo {
+                        id: target_id.to_string(),
+                        similarity,
+                        content_preview: preview(&previous_content, 200),
+                        merge_preview: merged_content,
+                    }),
+                })
+            }
+            MergeAction::Create => {
+                let node = self.ingest(input)?;
+                Ok(SmartIngestResult {
+                    decision: "create".to_string(),
+                    node,
+                    superseded_id: None,
+                    similarity: Some(similarity),
+                    prediction_error: Some(prediction_error),
+                    reason: format!(
+                        "Created new memory (VESTIGE_MERGE_MODE=off): gate proposed merging into {target_id} but was not acted on"
+                    ),
+                    previous_content: None,
+                    merged_from: None,
+                    merge_preview: None,
+                    supersede_candidate: None,
+                    merge_candidate: None,
                 })
             }
         }
@@ -4077,6 +4479,106 @@ impl SqliteMemoryStore {
             )
         })
         .unwrap_or(false)
+    }
+
+    /// Parse the `VESTIGE_SUPERSEDE_MODE` consent gate (v2.2.5 "Consent to
+    /// Supersede"). `off`/`0`/`false` → [`SupersedeMode::Off`], `auto` →
+    /// [`SupersedeMode::Auto`] (the guarded pre-2.2.5 auto-supersede),
+    /// everything else — including unset and `suggest` — defaults to
+    /// [`SupersedeMode::Suggest`] (case-insensitive, trimmed).
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    fn supersede_mode(raw: Option<&str>) -> SupersedeMode {
+        match raw.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+            Some("off") | Some("0") | Some("false") => SupersedeMode::Off,
+            Some("auto") => SupersedeMode::Auto,
+            _ => SupersedeMode::Suggest,
+        }
+    }
+
+    /// Parse the `VESTIGE_MERGE_MODE` consent gate — same values and default
+    /// as [`Self::supersede_mode`], governing the gate's Update/Merge
+    /// silent-append branch. (Reinforce at sim>=0.92 is untouched by design —
+    /// strengthening an existing memory is harmless.)
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    fn merge_mode(raw: Option<&str>) -> MergeMode {
+        Self::supersede_mode(raw)
+    }
+
+    /// Per-decision guards for gate-driven auto-supersede (v2.2.5, cloned
+    /// from the [`Self::dedup_pair_guard`] shape). Returns `Some(reason)` when
+    /// the pair must NOT be auto-superseded:
+    /// - the target is `protected` (absolute — matches
+    ///   [`Self::plan_supersede`]'s refusal; explicit confirms also honor it);
+    /// - different `node_type` (e.g. pattern vs event — the 2026-07-14/15
+    ///   wrongful firings crossed types);
+    /// - the target is a handoff/session-close record and the new memory is
+    ///   not (fix-notes constantly trip the correction keywords and must not
+    ///   eat session handoffs);
+    /// - the demoted-target branch fired without any contradiction signal —
+    ///   "similar + previously demoted" alone is not evidence of correction.
+    ///
+    /// Explicit confirms (`smart_ingest {supersede}`, `memory
+    /// {action:'supersede'}`) bypass everything except `protected`.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    fn supersede_guard(
+        new_type: &str,
+        new_tags: &[String],
+        target_type: &str,
+        target_tags: &[String],
+        target_protected: bool,
+        demoted_branch: bool,
+        appears_contradictory: bool,
+    ) -> Option<&'static str> {
+        if target_protected {
+            return Some("protected target");
+        }
+
+        if new_type != target_type {
+            return Some("node_type mismatch");
+        }
+
+        let is_handoff = |tags: &[String]| {
+            tags.iter().any(|t| {
+                let t = t.to_ascii_lowercase();
+                t.contains("handoff") || t.contains("session-close")
+            })
+        };
+        if is_handoff(target_tags) && !is_handoff(new_tags) {
+            return Some("handoff/session-close target");
+        }
+
+        if demoted_branch && !appears_contradictory {
+            return Some("demoted target without correction signal");
+        }
+
+        None
+    }
+
+    /// Map (consent mode × guard outcome) to the final action for a
+    /// gate-driven Supersede decision. Pure — unit-tested without embeddings.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    fn remap_supersede_decision(
+        mode: SupersedeMode,
+        guard_reason: Option<&'static str>,
+    ) -> SupersedeAction {
+        match mode {
+            SupersedeMode::Off => SupersedeAction::Create,
+            SupersedeMode::Suggest => SupersedeAction::Suggest,
+            // Auto: a guard hit downgrades to the Suggest behavior.
+            SupersedeMode::Auto if guard_reason.is_some() => SupersedeAction::Suggest,
+            SupersedeMode::Auto => SupersedeAction::Supersede,
+        }
+    }
+
+    /// Map the consent mode to the final action for a gate-driven
+    /// Update/Merge (append) decision. Pure — unit-tested without embeddings.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    fn remap_merge_decision(mode: MergeMode) -> MergeAction {
+        match mode {
+            SupersedeMode::Off => MergeAction::Create,
+            SupersedeMode::Suggest => MergeAction::Suggest,
+            SupersedeMode::Auto => MergeAction::Append,
+        }
     }
 
     /// Parse the `VESTIGE_DEDUP_THRESHOLD` cosine-similarity threshold.
@@ -8582,6 +9084,32 @@ impl SqliteMemoryStore {
 
         self.persist_plan(&plan)?;
         Ok(plan)
+    }
+
+    /// v2.2.5 unified supersede end-state: demote the loser AND bitemporally
+    /// invalidate it (valid_until + superseded_by) via the plan/apply
+    /// machinery, recording a reversible [`crate::advanced::MergeOperation`]
+    /// so `dedup {action:'undo'}` restores the stamps. Every supersede path —
+    /// gated auto, explicit `smart_ingest {supersede}`, and `memory
+    /// {action:'supersede'}` — ends here, so the loser's end-state is
+    /// identical everywhere: demoted, stamped, still queryable for audit.
+    /// Refuses protected losers (via [`Self::plan_supersede`]).
+    ///
+    /// Note: undo restores the bitemporal stamps; the FSRS demotion is a soft
+    /// ranking penalty and is not reverted (use `memory {action:'promote'}`).
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    pub fn supersede_memory(
+        &self,
+        loser_id: &str,
+        winner_id: &str,
+    ) -> Result<crate::advanced::MergeOperation> {
+        let policy = self.get_merge_policy().unwrap_or_default();
+        let plan = self.plan_supersede(loser_id, winner_id, policy)?;
+        // Every caller of this helper is a consent surface: confirmation was
+        // already given, so the classification gate is bypassed.
+        let op = self.apply_plan(&plan.id, true)?;
+        self.demote_memory(loser_id)?;
+        Ok(op)
     }
 
     /// Cosine similarity between two nodes' stored embeddings (0 if missing).
@@ -13803,6 +14331,467 @@ mod tests {
             "date guard needs a date on BOTH sides"
         );
         assert_eq!(Storage::dedup_pair_guard("fact", "plain", "fact", "text"), None);
+    }
+
+    // ================= Consent to Supersede (v2.2.5) =====================
+    //
+    // 2026-07-14/15 incidents: smart_ingest's prediction-error gate
+    // auto-superseded the WRONG memory 8 times out of 9 firings (similarity
+    // 0.74-0.86) because the "correction" branch keys on shared-vocabulary
+    // keyword heuristics that fix-notes and handoffs trip constantly. These
+    // tests pin the fix: consent modes (default suggest), per-decision
+    // guards, and the enriched reversible end-state on every confirm path.
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn supersede_and_merge_mode_parsing() {
+        assert_eq!(
+            Storage::supersede_mode(None),
+            SupersedeMode::Suggest,
+            "unset must default to Suggest"
+        );
+        assert_eq!(
+            Storage::supersede_mode(Some("suggest")),
+            SupersedeMode::Suggest
+        );
+        assert_eq!(Storage::supersede_mode(Some("off")), SupersedeMode::Off);
+        assert_eq!(
+            Storage::supersede_mode(Some("OFF")),
+            SupersedeMode::Off,
+            "case-insensitive"
+        );
+        assert_eq!(
+            Storage::supersede_mode(Some(" 0 ")),
+            SupersedeMode::Off,
+            "trimmed"
+        );
+        assert_eq!(Storage::supersede_mode(Some("false")), SupersedeMode::Off);
+        assert_eq!(Storage::supersede_mode(Some("auto")), SupersedeMode::Auto);
+        assert_eq!(Storage::supersede_mode(Some("AUTO")), SupersedeMode::Auto);
+        assert_eq!(
+            Storage::supersede_mode(Some("garbage")),
+            SupersedeMode::Suggest,
+            "unrecognized values fall back to Suggest, never Auto"
+        );
+
+        // VESTIGE_MERGE_MODE: same values, same default.
+        assert_eq!(Storage::merge_mode(None), SupersedeMode::Suggest);
+        assert_eq!(Storage::merge_mode(Some("auto")), SupersedeMode::Auto);
+        assert_eq!(Storage::merge_mode(Some("off")), SupersedeMode::Off);
+        assert_eq!(Storage::merge_mode(Some("nonsense")), SupersedeMode::Suggest);
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn supersede_guard_blocks_documented_wrongful_shapes() {
+        let no_tags: Vec<String> = vec![];
+        let tags = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+
+        // Wrongful shape 1: pattern-vs-event node_type mismatch.
+        assert_eq!(
+            Storage::supersede_guard("pattern", &no_tags, "event", &no_tags, false, false, true),
+            Some("node_type mismatch")
+        );
+
+        // Wrongful shape 2: fix-note supersedes a session handoff.
+        assert_eq!(
+            Storage::supersede_guard(
+                "fact",
+                &tags(&["vestige", "bugfix"]),
+                "fact",
+                &tags(&["Session-Close-2026-07-15"]),
+                false,
+                false,
+                true
+            ),
+            Some("handoff/session-close target"),
+            "handoff tag check is case-insensitive substring"
+        );
+        assert_eq!(
+            Storage::supersede_guard(
+                "fact",
+                &tags(&["handoff"]),
+                "fact",
+                &tags(&["handoff"]),
+                false,
+                false,
+                true
+            ),
+            None,
+            "handoff-to-handoff is allowed (new memory is also a handoff)"
+        );
+
+        // Wrongful shape 3: cross-codebase same-type pair where the
+        // demoted-target branch fired with no correction signal at all.
+        assert_eq!(
+            Storage::supersede_guard("fact", &no_tags, "fact", &no_tags, false, true, false),
+            Some("demoted target without correction signal")
+        );
+        assert_eq!(
+            Storage::supersede_guard("fact", &no_tags, "fact", &no_tags, false, true, true),
+            None,
+            "demoted branch WITH a contradiction signal passes"
+        );
+
+        // Protected target is absolute and reported first.
+        assert_eq!(
+            Storage::supersede_guard("pattern", &no_tags, "event", &no_tags, true, false, true),
+            Some("protected target")
+        );
+
+        // Clean pair passes.
+        assert_eq!(
+            Storage::supersede_guard("fact", &no_tags, "fact", &no_tags, false, false, true),
+            None
+        );
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn remap_supersede_and_merge_decisions() {
+        // Off: never act, regardless of guards.
+        assert_eq!(
+            Storage::remap_supersede_decision(SupersedeMode::Off, None),
+            SupersedeAction::Create
+        );
+        assert_eq!(
+            Storage::remap_supersede_decision(SupersedeMode::Off, Some("node_type mismatch")),
+            SupersedeAction::Create
+        );
+        // Suggest (default): always a suggestion.
+        assert_eq!(
+            Storage::remap_supersede_decision(SupersedeMode::Suggest, None),
+            SupersedeAction::Suggest
+        );
+        assert_eq!(
+            Storage::remap_supersede_decision(SupersedeMode::Suggest, Some("protected target")),
+            SupersedeAction::Suggest
+        );
+        // Auto: guard pass supersedes, guard hit downgrades to suggestion.
+        assert_eq!(
+            Storage::remap_supersede_decision(SupersedeMode::Auto, None),
+            SupersedeAction::Supersede
+        );
+        assert_eq!(
+            Storage::remap_supersede_decision(
+                SupersedeMode::Auto,
+                Some("handoff/session-close target")
+            ),
+            SupersedeAction::Suggest,
+            "auto + guard hit must downgrade, not fire"
+        );
+
+        // Merge branch: same modes, no guards.
+        assert_eq!(
+            Storage::remap_merge_decision(SupersedeMode::Off),
+            MergeAction::Create
+        );
+        assert_eq!(
+            Storage::remap_merge_decision(SupersedeMode::Suggest),
+            MergeAction::Suggest
+        );
+        assert_eq!(
+            Storage::remap_merge_decision(SupersedeMode::Auto),
+            MergeAction::Append
+        );
+    }
+
+    /// End-state test (follows test_supersede_invalidates_old_but_keeps_it_queryable):
+    /// a confirmed supersede leaves the loser demoted AND stamped AND still
+    /// get_node-able; undo restores the stamps.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn supersede_memory_demotes_stamps_and_is_reversible() {
+        let storage = create_test_storage();
+        let loser = seed_node(&storage, "LR should be 1e-4", &["ml"], axis_vector(31, 0.02));
+        let winner = seed_node(
+            &storage,
+            "Correction: LR should be 3e-4",
+            &["ml"],
+            axis_vector(31, 0.01),
+        );
+
+        let before = storage.get_node(&loser).unwrap().unwrap();
+        let op = storage.supersede_memory(&loser, &winner).unwrap();
+        assert_eq!(op.op_type, "supersede");
+
+        // Demoted: FSRS penalties applied.
+        let after = storage.get_node(&loser).unwrap().unwrap();
+        assert!(
+            after.retrieval_strength < before.retrieval_strength,
+            "loser must be demoted (retrieval {} -> {})",
+            before.retrieval_strength,
+            after.retrieval_strength
+        );
+        assert!(after.stability < before.stability, "stability halved");
+
+        // Stamped bitemporally, but STILL QUERYABLE (invalidate, don't delete).
+        let (vu, sb) = storage.read_bitemporal(&loser).unwrap();
+        assert!(vu.is_some(), "loser stamped valid_until");
+        assert_eq!(sb.as_deref(), Some(winner.as_str()));
+        assert_eq!(after.content, "LR should be 1e-4");
+        assert!(storage.superseded_node_ids().unwrap().contains(&loser));
+
+        // Undo restores the stamps (demotion is a soft penalty, not reverted).
+        storage.merge_undo(&op.id).unwrap();
+        let (vu2, sb2) = storage.read_bitemporal(&loser).unwrap();
+        assert!(vu2.is_none() && sb2.is_none(), "stamps cleared on undo");
+        assert!(!storage.superseded_node_ids().unwrap().contains(&loser));
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn supersede_memory_refuses_protected_loser() {
+        let storage = create_test_storage();
+        let loser = seed_node(
+            &storage,
+            "Pinned load-bearing fact",
+            &["pin"],
+            axis_vector(32, 0.02),
+        );
+        let winner = seed_node(
+            &storage,
+            "Pinned load-bearing fact restated",
+            &["pin"],
+            axis_vector(32, 0.01),
+        );
+        storage.set_protected(&loser, true).unwrap();
+
+        assert!(storage.supersede_memory(&loser, &winner).is_err());
+        let (vu, sb) = storage.read_bitemporal(&loser).unwrap();
+        assert!(vu.is_none() && sb.is_none(), "refusal must not stamp");
+        let node = storage.get_node(&loser).unwrap().unwrap();
+        assert!(
+            node.retrieval_strength > 0.3,
+            "refusal must not demote either"
+        );
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn explicit_supersede_honored_even_when_mode_off() {
+        with_env_var("VESTIGE_SUPERSEDE_MODE", Some("off"), || {
+            let storage = create_test_storage();
+            let target = seed_node(
+                &storage,
+                "old canonical answer",
+                &["t"],
+                axis_vector(33, 0.02),
+            );
+
+            // No live embedding service in tests: the explicit path must
+            // still work (similarity omitted), even with the mode off.
+            let result = storage
+                .smart_ingest_with_options(
+                    IngestInput {
+                        content: "new canonical answer".to_string(),
+                        node_type: "fact".to_string(),
+                        ..Default::default()
+                    },
+                    &[],
+                    Some(&target),
+                )
+                .unwrap();
+
+            assert_eq!(result.decision, "supersede");
+            assert_eq!(result.superseded_id.as_deref(), Some(target.as_str()));
+            let (vu, sb) = storage.read_bitemporal(&target).unwrap();
+            assert!(vu.is_some(), "explicit confirm stamps");
+            assert_eq!(sb.as_deref(), Some(result.node.id.as_str()));
+        });
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn explicit_supersede_refuses_protected_and_missing_targets() {
+        let storage = create_test_storage();
+        let target = seed_node(&storage, "protected note", &["t"], axis_vector(34, 0.02));
+        storage.set_protected(&target, true).unwrap();
+
+        let input = || IngestInput {
+            content: "replacement note".to_string(),
+            node_type: "fact".to_string(),
+            ..Default::default()
+        };
+
+        let err = storage
+            .smart_ingest_with_options(input(), &[], Some(&target))
+            .unwrap_err();
+        assert!(err.to_string().contains("protected"));
+        let (vu, _) = storage.read_bitemporal(&target).unwrap();
+        assert!(vu.is_none(), "refusal must not stamp");
+
+        assert!(
+            storage
+                .smart_ingest_with_options(input(), &[], Some("00000000-0000-0000-0000-000000000000"))
+                .is_err(),
+            "missing target must error, not silently create"
+        );
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn gate_supersede_suggests_by_default_and_stamps_in_auto() {
+        let storage = create_test_storage();
+        let target = seed_node(&storage, "Use sync IO", &["t"], axis_vector(35, 0.02));
+        let input = |content: &str| IngestInput {
+            content: content.to_string(),
+            node_type: "fact".to_string(),
+            ..Default::default()
+        };
+        use crate::advanced::prediction_error::SupersedeReason;
+
+        // Suggest (default): new node created, candidate attached, target untouched.
+        let res = storage
+            .apply_supersede_decision(
+                input("Actually, use async IO"),
+                &target,
+                0.8,
+                0.2,
+                SupersedeReason::Correction,
+                "fact",
+                "Use sync IO",
+                &[],
+                SupersedeMode::Suggest,
+            )
+            .unwrap();
+        assert_eq!(res.decision, "create");
+        assert_ne!(res.node.id, target);
+        let sc = res.supersede_candidate.expect("suggestion attached");
+        assert_eq!(sc.id, target);
+        assert!(sc.would_pass_guards);
+        assert!(sc.guard_reason.is_none());
+        assert_eq!(sc.supersede_reason, "Correction");
+        assert!(res.merge_candidate.is_none());
+        let (vu, _) = storage.read_bitemporal(&target).unwrap();
+        assert!(vu.is_none(), "suggestion must not stamp");
+
+        // Off: plain create, no candidate.
+        let res_off = storage
+            .apply_supersede_decision(
+                input("Actually, use async IO please"),
+                &target,
+                0.8,
+                0.2,
+                SupersedeReason::Correction,
+                "fact",
+                "Use sync IO",
+                &[],
+                SupersedeMode::Off,
+            )
+            .unwrap();
+        assert_eq!(res_off.decision, "create");
+        assert!(res_off.supersede_candidate.is_none());
+
+        // Auto + clean guard: enriched supersede (demote + stamp).
+        let res_auto = storage
+            .apply_supersede_decision(
+                input("Actually, use async IO everywhere"),
+                &target,
+                0.8,
+                0.2,
+                SupersedeReason::Correction,
+                "fact",
+                "Use sync IO",
+                &[],
+                SupersedeMode::Auto,
+            )
+            .unwrap();
+        assert_eq!(res_auto.decision, "supersede");
+        assert_eq!(res_auto.superseded_id.as_deref(), Some(target.as_str()));
+        let (vu2, sb2) = storage.read_bitemporal(&target).unwrap();
+        assert!(vu2.is_some(), "auto mode stamps");
+        assert_eq!(sb2.as_deref(), Some(res_auto.node.id.as_str()));
+        let demoted = storage.get_node(&target).unwrap().unwrap();
+        assert!(demoted.retrieval_strength < 0.9, "auto mode demotes");
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn gate_supersede_auto_guard_hit_downgrades_to_suggestion() {
+        let storage = create_test_storage();
+        let target = seed_node(
+            &storage,
+            "Session handoff 2026-07-15 notes",
+            &["session-close-2026-07-15"],
+            axis_vector(36, 0.02),
+        );
+        use crate::advanced::prediction_error::SupersedeReason;
+
+        // The wrongful incident shape: a fix-note vs a handoff, in auto mode.
+        let res = storage
+            .apply_supersede_decision(
+                IngestInput {
+                    content: "Fixed the loader bug, actually the config was wrong".to_string(),
+                    node_type: "fact".to_string(),
+                    tags: vec!["bugfix".to_string()],
+                    ..Default::default()
+                },
+                &target,
+                0.8,
+                0.2,
+                SupersedeReason::Correction,
+                "fact",
+                "Session handoff 2026-07-15 notes",
+                &["session-close-2026-07-15".to_string()],
+                SupersedeMode::Auto,
+            )
+            .unwrap();
+
+        assert_eq!(res.decision, "create", "guard hit must downgrade");
+        let sc = res.supersede_candidate.expect("downgrade attaches candidate");
+        assert!(!sc.would_pass_guards);
+        assert_eq!(sc.guard_reason.as_deref(), Some("handoff/session-close target"));
+        let (vu, sb) = storage.read_bitemporal(&target).unwrap();
+        assert!(vu.is_none() && sb.is_none(), "handoff must not be stamped");
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn gate_merge_suggests_by_default_appends_in_auto() {
+        let storage = create_test_storage();
+        let target = seed_node(&storage, "original content", &["t"], axis_vector(37, 0.02));
+        let input = |content: &str| IngestInput {
+            content: content.to_string(),
+            node_type: "fact".to_string(),
+            ..Default::default()
+        };
+
+        // Suggest (default): create + merge_candidate, NO silent append.
+        let res = storage
+            .apply_merge_decision(input("additional detail"), &target, 0.8, 0.2, SupersedeMode::Suggest)
+            .unwrap();
+        assert_eq!(res.decision, "create");
+        assert_ne!(res.node.id, target);
+        let mc = res.merge_candidate.expect("merge suggestion attached");
+        assert_eq!(mc.id, target);
+        assert!(mc.merge_preview.contains("original content"));
+        assert!(mc.merge_preview.contains("additional detail"));
+        assert!(res.supersede_candidate.is_none());
+        let t = storage.get_node(&target).unwrap().unwrap();
+        assert_eq!(t.content, "original content", "no silent append in suggest mode");
+
+        // Off: plain create, no candidate, target untouched.
+        let res_off = storage
+            .apply_merge_decision(input("more detail"), &target, 0.8, 0.2, SupersedeMode::Off)
+            .unwrap();
+        assert_eq!(res_off.decision, "create");
+        assert!(res_off.merge_candidate.is_none());
+        assert_eq!(
+            storage.get_node(&target).unwrap().unwrap().content,
+            "original content"
+        );
+
+        // Auto: legacy append into the existing memory.
+        let res_auto = storage
+            .apply_merge_decision(input("appended detail"), &target, 0.8, 0.2, SupersedeMode::Auto)
+            .unwrap();
+        assert_eq!(res_auto.decision, "update");
+        assert_eq!(res_auto.node.id, target, "auto mode mutates the target");
+        assert_eq!(res_auto.merged_from.as_deref(), Some(target.as_str()));
+        let t2 = storage.get_node(&target).unwrap().unwrap();
+        assert!(t2.content.contains("original content"));
+        assert!(t2.content.contains("appended detail"));
     }
 
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]

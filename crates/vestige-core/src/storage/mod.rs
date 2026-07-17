@@ -29,9 +29,10 @@ pub use sqlite::{
     CompositionEventRecord, CompositionMemberRecord, CompositionNeighborRecord,
     CompositionOutcomeRecord, ConnectionRecord, ConnectorCursor, ConsolidationHistoryRecord,
     DeletionTombstone, DreamHistoryRecord, FilePortableSyncBackend, InsightRecord, IntentionRecord,
-    NeverComposedCandidate, PortableSyncBackend, PortableSyncReport, ReconcileReport, Result,
-    SmartIngestResult, SourceUpsertOutcome, SourceUpsertResult, SqliteMemoryStore,
-    StateTransitionRecord, StorageError,
+    MergeCandidateInfo, MergeMode, NeverComposedCandidate, PortableSyncBackend,
+    PortableSyncReport, ReconcileReport, Result, SmartIngestResult, SourceUpsertOutcome,
+    SourceUpsertResult, SqliteMemoryStore, StateTransitionRecord, StorageError,
+    SupersedeCandidate, SupersedeMode,
 };
 pub use trace_store::AgentRunSummary;
 

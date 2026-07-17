@@ -547,50 +547,7 @@ impl PredictionErrorGate {
     ///
     /// Uses simple heuristics; could be enhanced with NLI model
     fn detect_contradiction(&self, new_content: &str, old_content: &str) -> bool {
-        let new_lower = new_content.to_lowercase();
-        let old_lower = old_content.to_lowercase();
-
-        // Check for explicit negation patterns
-        let negation_pairs = [
-            ("don't", "do"),
-            ("never", "always"),
-            ("avoid", "use"),
-            ("wrong", "right"),
-            ("bad", "good"),
-            ("incorrect", "correct"),
-            ("deprecated", "recommended"),
-            ("outdated", "current"),
-            ("instead of", ""),
-            ("rather than", ""),
-            ("not ", ""),
-        ];
-
-        for (neg, _pos) in negation_pairs.iter() {
-            if new_lower.contains(neg) && !old_lower.contains(neg) {
-                return true;
-            }
-        }
-
-        // Check for correction phrases
-        let correction_phrases = [
-            "actually",
-            "correction",
-            "update:",
-            "fixed",
-            "was wrong",
-            "should be",
-            "better approach",
-            "improved",
-            "the right way",
-        ];
-
-        for phrase in correction_phrases.iter() {
-            if new_lower.contains(phrase) {
-                return true;
-            }
-        }
-
-        false
+        detect_contradiction(new_content, old_content)
     }
 
     /// Get statistics
@@ -675,6 +632,60 @@ impl GateStats {
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
+
+/// Detect if two pieces of content appear contradictory (keyword heuristics).
+///
+/// Exposed as a free function (v2.2.5 "Consent to Supersede") so storage-side
+/// supersede guards can re-check the correction signal without constructing a
+/// gate. Note these are exactly the shared-vocabulary keywords ("actually",
+/// "fixed", "not ", "update:", ...) that fix-notes and session handoffs trip
+/// constantly — which is why gate-driven supersession is consent-gated.
+pub fn detect_contradiction(new_content: &str, old_content: &str) -> bool {
+    let new_lower = new_content.to_lowercase();
+    let old_lower = old_content.to_lowercase();
+
+    // Check for explicit negation patterns
+    let negation_pairs = [
+        ("don't", "do"),
+        ("never", "always"),
+        ("avoid", "use"),
+        ("wrong", "right"),
+        ("bad", "good"),
+        ("incorrect", "correct"),
+        ("deprecated", "recommended"),
+        ("outdated", "current"),
+        ("instead of", ""),
+        ("rather than", ""),
+        ("not ", ""),
+    ];
+
+    for (neg, _pos) in negation_pairs.iter() {
+        if new_lower.contains(neg) && !old_lower.contains(neg) {
+            return true;
+        }
+    }
+
+    // Check for correction phrases
+    let correction_phrases = [
+        "actually",
+        "correction",
+        "update:",
+        "fixed",
+        "was wrong",
+        "should be",
+        "better approach",
+        "improved",
+        "the right way",
+    ];
+
+    for phrase in correction_phrases.iter() {
+        if new_lower.contains(phrase) {
+            return true;
+        }
+    }
+
+    false
+}
 
 /// Calculate cosine similarity between two vectors
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
