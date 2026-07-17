@@ -43,8 +43,8 @@ pub fn schema() -> Value {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["get", "get_batch", "delete", "purge", "state", "promote", "demote", "edit"],
-                "description": "Action to perform: 'get' retrieves full memory node, 'get_batch' retrieves multiple memories by IDs (use 'ids' array), 'purge' permanently removes memory content and embeddings after confirm=true, 'delete' is a backwards-compatible alias for purge and also requires confirm=true, 'state' returns accessibility state, 'promote' increases retrieval strength (thumbs up), 'demote' decreases retrieval strength (thumbs down), 'edit' updates content in-place (preserves FSRS state)"
+                "enum": ["get", "get_batch", "delete", "purge", "state", "promote", "demote", "edit", "supersede"],
+                "description": "Action to perform: 'get' retrieves full memory node, 'get_batch' retrieves multiple memories by IDs (use 'ids' array), 'purge' permanently removes memory content and embeddings after confirm=true, 'delete' is a backwards-compatible alias for purge and also requires confirm=true, 'state' returns accessibility state, 'promote' increases retrieval strength (thumbs up), 'demote' decreases retrieval strength (thumbs down), 'edit' updates content in-place (preserves FSRS state), 'supersede' marks memory 'id' as superseded by 'winnerId' (demotes + stamps valid_until/superseded_by, keeps it queryable for audit, reversible via dedup undo; refuses protected targets)"
             },
             "id": {
                 "type": "string",
@@ -67,6 +67,10 @@ pub fn schema() -> Value {
             "content": {
                 "type": "string",
                 "description": "New content for edit action. Replaces existing content, regenerates embedding, preserves FSRS state."
+            },
+            "winnerId": {
+                "type": "string",
+                "description": "For action='supersede': the memory that replaces 'id'. The loser ('id') is demoted and bitemporally stamped (valid_until + superseded_by); the operation is reversible via dedup undo."
             }
         },
         "required": ["action"]
@@ -82,6 +86,7 @@ struct MemoryArgs {
     reason: Option<String>,
     confirm: Option<bool>,
     content: Option<String>,
+    winner_id: Option<String>,
 }
 
 /// Execute the unified memory tool
@@ -140,10 +145,53 @@ pub async fn execute(
         "promote" => execute_promote(storage, cognitive, &id, args.reason).await,
         "demote" => execute_demote(storage, cognitive, &id, args.reason).await,
         "edit" => execute_edit(storage, &id, args.content).await,
+        "supersede" => execute_supersede(storage, &id, args.winner_id).await,
         _ => Err(format!(
-            "Invalid action '{}'. Must be one of: get, get_batch, delete, purge, state, promote, demote, edit",
+            "Invalid action '{}'. Must be one of: get, get_batch, delete, purge, state, promote, demote, edit, supersede",
             args.action
         )),
+    }
+}
+
+/// v2.2.5 "Consent to Supersede": confirm-after-suggest surface. Marks `id`
+/// (the loser) as superseded by `winner_id` via the unified enriched helper —
+/// demote + bitemporal stamp (valid_until + superseded_by) + reversible
+/// MergeOperation. The loser stays queryable for audit; protected losers are
+/// refused.
+async fn execute_supersede(
+    storage: &Arc<Storage>,
+    loser_id: &str,
+    winner_id: Option<String>,
+) -> Result<Value, String> {
+    let winner_id = winner_id
+        .ok_or("action='supersede' requires 'winnerId' (the memory that replaces 'id')")?;
+    uuid::Uuid::parse_str(&winner_id).map_err(|_| "Invalid winnerId format".to_string())?;
+    if loser_id == winner_id {
+        return Err("'id' (the superseded memory) and 'winnerId' must differ".to_string());
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    {
+        let op = storage
+            .supersede_memory(loser_id, &winner_id)
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({
+            "action": "supersede",
+            "success": true,
+            "loserId": loser_id,
+            "winnerId": winner_id,
+            "operationId": op.id,
+            "message": format!(
+                "Memory {} superseded by {}: demoted + stamped valid_until/superseded_by, still queryable for audit. Reversible via dedup {{action:'undo', operation_id:'{}'}}.",
+                loser_id, winner_id, op.id
+            ),
+        }))
+    }
+
+    #[cfg(not(all(feature = "embeddings", feature = "vector-search")))]
+    {
+        let _ = (storage, loser_id, winner_id);
+        Err("supersede requires a build with the embeddings + vector-search features".to_string())
     }
 }
 
@@ -538,15 +586,17 @@ mod tests {
         assert!(schema["properties"]["reason"].is_object());
         assert_eq!(schema["required"], serde_json::json!(["action"]));
         assert!(schema["properties"]["ids"].is_object()); // get_batch support
-        // Verify all 8 actions are in enum
+        // Verify all 9 actions are in enum
         let actions = schema["properties"]["action"]["enum"].as_array().unwrap();
-        assert_eq!(actions.len(), 8);
+        assert_eq!(actions.len(), 9);
         assert!(actions.contains(&serde_json::json!("get_batch")));
         assert!(actions.contains(&serde_json::json!("purge")));
         assert!(actions.contains(&serde_json::json!("edit")));
         assert!(actions.contains(&serde_json::json!("promote")));
         assert!(actions.contains(&serde_json::json!("demote")));
+        assert!(actions.contains(&serde_json::json!("supersede")));
         assert!(schema["properties"]["confirm"].is_object());
+        assert!(schema["properties"]["winnerId"].is_object()); // supersede support
     }
 
     // === INTEGRATION TESTS ===
@@ -1008,5 +1058,76 @@ mod tests {
         assert!(result.is_ok());
         let value = result.unwrap();
         assert_eq!(value["success"], true);
+    }
+
+    // === SUPERSEDE ACTION (v2.2.5 "Consent to Supersede") ===
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[tokio::test]
+    async fn test_supersede_demotes_and_stamps_loser() {
+        let (storage, _dir) = test_storage().await;
+        let loser = ingest_memory(&storage).await;
+        let winner = ingest_memory(&storage).await;
+        let before = storage.get_node(&loser).unwrap().unwrap();
+
+        let args = serde_json::json!({
+            "action": "supersede",
+            "id": loser,
+            "winnerId": winner
+        });
+        let value = execute(&storage, &test_cognitive(), Some(args))
+            .await
+            .unwrap();
+
+        assert_eq!(value["success"], true);
+        assert_eq!(value["action"], "supersede");
+        assert_eq!(value["loserId"], serde_json::json!(loser));
+        assert_eq!(value["winnerId"], serde_json::json!(winner));
+        assert!(value["operationId"].is_string(), "reversible operation id returned");
+
+        // Enriched end-state: demoted + stamped + still queryable.
+        assert!(storage.superseded_node_ids().unwrap().contains(&loser));
+        let after = storage.get_node(&loser).unwrap().unwrap();
+        assert!(after.retrieval_strength < before.retrieval_strength);
+        assert_eq!(after.content, before.content, "content untouched, audit-queryable");
+    }
+
+    #[tokio::test]
+    async fn test_supersede_requires_winner_id() {
+        let (storage, _dir) = test_storage().await;
+        let loser = ingest_memory(&storage).await;
+        let args = serde_json::json!({ "action": "supersede", "id": loser });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("winnerId"));
+    }
+
+    #[tokio::test]
+    async fn test_supersede_rejects_same_ids() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+        let args = serde_json::json!({ "action": "supersede", "id": id, "winnerId": id });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must differ"));
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[tokio::test]
+    async fn test_supersede_refuses_protected_loser() {
+        let (storage, _dir) = test_storage().await;
+        let loser = ingest_memory(&storage).await;
+        let winner = ingest_memory(&storage).await;
+        storage.set_protected(&loser, true).unwrap();
+
+        let args = serde_json::json!({
+            "action": "supersede",
+            "id": loser,
+            "winnerId": winner
+        });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("protected"));
+        assert!(!storage.superseded_node_ids().unwrap().contains(&loser));
     }
 }

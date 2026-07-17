@@ -261,7 +261,7 @@ impl McpServer {
             // ================================================================
             ToolDescription {
                 name: "memory".to_string(),
-                description: Some("Unified memory management tool. Actions: 'get' (retrieve full node), 'purge' (irreversibly remove content/embeddings with confirm=true), 'delete' (legacy alias for purge), 'state' (get accessibility state), 'promote' (thumbs up — increases retrieval strength), 'demote' (thumbs down — decreases retrieval strength, does NOT delete), 'edit' (update content in-place, preserves FSRS state).".to_string()),
+                description: Some("Unified memory management tool. Actions: 'get' (retrieve full node), 'purge' (irreversibly remove content/embeddings with confirm=true), 'delete' (legacy alias for purge), 'state' (get accessibility state), 'promote' (thumbs up — increases retrieval strength), 'demote' (thumbs down — decreases retrieval strength, does NOT delete), 'edit' (update content in-place, preserves FSRS state), 'supersede' (mark 'id' superseded by 'winnerId': demote + stamp valid_until/superseded_by, reversible via dedup undo; refuses protected targets).".to_string()),
                 input_schema: tools::memory_unified::schema(),
                 ..Default::default()
             },
@@ -282,7 +282,7 @@ impl McpServer {
             // ================================================================
             ToolDescription {
                 name: "smart_ingest".to_string(),
-                description: Some("INTELLIGENT memory ingestion with Prediction Error Gating. Single mode: provide 'content' to auto-decide CREATE/UPDATE/SUPERSEDE. Batch mode: provide 'items' array (max 20) for session-end saves — each item runs the full cognitive pipeline (importance scoring, intent detection, synaptic tagging).".to_string()),
+                description: Some("INTELLIGENT memory ingestion with Prediction Error Gating. Single mode: provide 'content' — similar content updates/reinforces existing memories; contradiction-shaped content SUGGESTS supersession by default (supersedeCandidate in the response) instead of auto-superseding — confirm with supersede='<node-id>' or memory action='supersede'. VESTIGE_SUPERSEDE_MODE=auto restores gated auto-supersede; VESTIGE_MERGE_MODE governs the merge-append branch the same way. Batch mode: provide 'items' array (max 20) for session-end saves — each item runs the full cognitive pipeline (importance scoring, intent detection, synaptic tagging).".to_string()),
                 input_schema: tools::smart_ingest::schema(),
                 ..Default::default()
             },

@@ -57,6 +57,10 @@ pub fn schema() -> Value {
                 "description": "Force creation of a new memory even if similar content exists",
                 "default": false
             },
+            "supersede": {
+                "type": "string",
+                "description": "Explicit consent (v2.2.5): node ID of an existing memory this new content supersedes. The target is demoted and bitemporally stamped (valid_until + superseded_by), stays queryable for audit, and the operation is reversible via dedup undo. Refused if the target is protected. Honored in every VESTIGE_SUPERSEDE_MODE (default 'suggest': gate proposals come back as supersedeCandidate instead of firing automatically; 'auto' restores guarded auto-supersede; 'off' never supersedes from the gate. VESTIGE_MERGE_MODE governs the merge-append branch the same way). Single mode only."
+            },
             "batchMergePolicy": {
                 "type": "string",
                 "enum": ["force_create", "smart"],
@@ -110,6 +114,7 @@ struct SmartIngestArgs {
     tags: Option<Vec<String>>,
     source: Option<String>,
     force_create: Option<bool>,
+    supersede: Option<String>,
     batch_merge_policy: Option<String>,
     items: Option<Vec<BatchItem>>,
 }
@@ -222,6 +227,39 @@ pub async fn execute(
     // INGEST (storage lock)
     // ====================================================================
 
+    // v2.2.5: explicit supersede consent. Takes precedence over forceCreate
+    // (it also creates a new node) and over the gate — the caller has already
+    // confirmed the target. Refused when the target is protected.
+    if let Some(target_id) = args.supersede.as_deref() {
+        uuid::Uuid::parse_str(target_id)
+            .map_err(|_| "Invalid supersede target ID format".to_string())?;
+
+        #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+        {
+            let result = storage
+                .smart_ingest_with_options(input, &[], Some(target_id))
+                .map_err(|e| e.to_string())?;
+
+            run_post_ingest(
+                cognitive,
+                &result.node.id,
+                &result.node.content,
+                &result.node.node_type,
+                importance_composite,
+            );
+
+            return Ok(build_single_response(&result, importance_composite));
+        }
+
+        #[cfg(not(all(feature = "embeddings", feature = "vector-search")))]
+        {
+            return Err(
+                "supersede requires a build with the embeddings + vector-search features"
+                    .to_string(),
+            );
+        }
+    }
+
     // Check if force_create is enabled
     if args.force_create.unwrap_or(false) {
         let node = storage.ingest(input).map_err(|e| e.to_string())?;
@@ -255,45 +293,17 @@ pub async fn execute(
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
     {
         let result = storage.smart_ingest(input).map_err(|e| e.to_string())?;
-        let node_id = result.node.id.clone();
-        let node_content = result.node.content.clone();
-        let node_type = result.node.node_type.clone();
-        let has_embedding = result.node.has_embedding.unwrap_or(false);
 
         // Post-ingest cognitive side effects
         run_post_ingest(
             cognitive,
-            &node_id,
-            &node_content,
-            &node_type,
+            &result.node.id,
+            &result.node.content,
+            &result.node.node_type,
             importance_composite,
         );
 
-        Ok(serde_json::json!({
-            "success": true,
-            "decision": result.decision,
-            "nodeId": node_id,
-            "message": format!("Smart ingest complete: {}", result.reason),
-            "hasEmbedding": has_embedding,
-            "similarity": result.similarity,
-            "predictionError": result.prediction_error,
-            "supersededId": result.superseded_id,
-            "previousContent": result.previous_content,
-            "mergedFrom": result.merged_from,
-            "mergePreview": result.merge_preview,
-            "importanceScore": importance_composite,
-            "reason": result.reason,
-            "explanation": match result.decision.as_str() {
-                "create" => "Created new memory - content was different enough from existing memories",
-                "update" => "Updated existing memory - content was similar to an existing memory",
-                "reinforce" => "Reinforced existing memory - content was nearly identical",
-                "supersede" => "Superseded old memory - new content is an improvement/correction",
-                "merge" => "Merged with related memories - content connects multiple topics",
-                "replace" => "Replaced existing memory content entirely",
-                "add_context" => "Added new content as context to existing memory",
-                _ => "Memory processed successfully"
-            }
-        }))
+        Ok(build_single_response(&result, importance_composite))
     }
 
     #[cfg(not(all(feature = "embeddings", feature = "vector-search")))]
@@ -322,6 +332,61 @@ pub async fn execute(
             "reason": "Embeddings not available - used regular ingest"
         }))
     }
+}
+
+/// Build the single-mode response JSON from a [`vestige_core::SmartIngestResult`].
+///
+/// Existing fields keep their exact pre-2.2.5 shapes (Option fields serialize
+/// as null when absent, as before); the v2.2.5 `supersedeCandidate` /
+/// `mergeCandidate` keys are strictly additive and OMITTED when absent.
+#[cfg(all(feature = "embeddings", feature = "vector-search"))]
+fn build_single_response(
+    result: &vestige_core::SmartIngestResult,
+    importance_composite: f64,
+) -> Value {
+    let has_embedding = result.node.has_embedding.unwrap_or(false);
+    let explanation = match result.decision.as_str() {
+        "create" if result.supersede_candidate.is_some() =>
+            "Created new memory - a similar memory was found; pass supersede='<id>' from supersedeCandidate to confirm superseding it",
+        "create" if result.merge_candidate.is_some() =>
+            "Created new memory - a similar memory was found; see mergeCandidate for the suggested combination",
+        "create" => "Created new memory - content was different enough from existing memories",
+        "update" => "Updated existing memory - content was similar to an existing memory",
+        "reinforce" => "Reinforced existing memory - content was nearly identical",
+        "supersede" => "Superseded old memory - target demoted + stamped valid_until/superseded_by, reversible via dedup undo",
+        "merge" => "Merged with related memories - content connects multiple topics",
+        "replace" => "Replaced existing memory content entirely",
+        "add_context" => "Added new content as context to existing memory",
+        _ => "Memory processed successfully",
+    };
+
+    let mut response = serde_json::json!({
+        "success": true,
+        "decision": result.decision,
+        "nodeId": result.node.id,
+        "message": format!("Smart ingest complete: {}", result.reason),
+        "hasEmbedding": has_embedding,
+        "similarity": result.similarity,
+        "predictionError": result.prediction_error,
+        "supersededId": result.superseded_id,
+        "previousContent": result.previous_content,
+        "mergedFrom": result.merged_from,
+        "mergePreview": result.merge_preview,
+        "importanceScore": importance_composite,
+        "reason": result.reason,
+        "explanation": explanation
+    });
+    if let Some(sc) = &result.supersede_candidate
+        && let Ok(v) = serde_json::to_value(sc)
+    {
+        response["supersedeCandidate"] = v;
+    }
+    if let Some(mc) = &result.merge_candidate
+        && let Ok(v) = serde_json::to_value(mc)
+    {
+        response["mergeCandidate"] = v;
+    }
+    response
 }
 
 /// Execute batch mode: process up to 20 items, each with full cognitive pipeline.
@@ -488,7 +553,7 @@ async fn execute_batch(
                         importance_composite,
                     );
 
-                    results.push(serde_json::json!({
+                    let mut item_json = serde_json::json!({
                         "index": i,
                         "status": "saved",
                         "decision": result.decision,
@@ -501,7 +566,19 @@ async fn execute_batch(
                         "mergePreview": result.merge_preview,
                         "importanceScore": importance_composite,
                         "reason": result.reason
-                    }));
+                    });
+                    // v2.2.5: additive consent-suggestion fields, omitted when absent.
+                    if let Some(sc) = &result.supersede_candidate
+                        && let Ok(v) = serde_json::to_value(sc)
+                    {
+                        item_json["supersedeCandidate"] = v;
+                    }
+                    if let Some(mc) = &result.merge_candidate
+                        && let Ok(v) = serde_json::to_value(mc)
+                    {
+                        item_json["mergeCandidate"] = v;
+                    }
+                    results.push(item_json);
                 }
                 Err(e) => {
                     errors += 1;
@@ -1144,5 +1221,205 @@ mod tests {
         let result = execute(&storage, &test_cognitive(), Some(args)).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("content"));
+    }
+
+    // ========================================================================
+    // CONSENT TO SUPERSEDE (v2.2.5)
+    // ========================================================================
+
+    /// Serializes env-var mutation across async tests in this module.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Sets an env var for the guard's lifetime and restores the previous
+    /// value (or absence) on drop, even on panic.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, prev }
+        }
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    /// Seed a memory directly through storage for supersede-target tests.
+    fn seed_memory(storage: &Arc<Storage>, content: &str) -> String {
+        storage
+            .ingest(IngestInput {
+                content: content.to_string(),
+                node_type: "fact".to_string(),
+                ..Default::default()
+            })
+            .unwrap()
+            .id
+    }
+
+    #[test]
+    fn test_schema_has_supersede_param() {
+        let schema_value = schema();
+        assert!(schema_value["properties"]["supersede"].is_object());
+        assert_eq!(schema_value["properties"]["supersede"]["type"], "string");
+    }
+
+    #[tokio::test]
+    async fn test_response_omits_candidates_when_absent() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({ "content": "A memory with no similar neighbors." });
+        let value = execute(&storage, &test_cognitive(), Some(args))
+            .await
+            .unwrap();
+        assert!(
+            value.get("supersedeCandidate").is_none(),
+            "supersedeCandidate must be omitted (not null) when absent"
+        );
+        assert!(
+            value.get("mergeCandidate").is_none(),
+            "mergeCandidate must be omitted (not null) when absent"
+        );
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[tokio::test]
+    async fn test_explicit_supersede_stamps_target() {
+        let (storage, _dir) = test_storage().await;
+        let target = seed_memory(&storage, "Old answer: use port 3927.");
+        let before = storage.get_node(&target).unwrap().unwrap();
+
+        let args = serde_json::json!({
+            "content": "Corrected answer: use port 3928.",
+            "supersede": target
+        });
+        let value = execute(&storage, &test_cognitive(), Some(args))
+            .await
+            .unwrap();
+
+        assert_eq!(value["decision"], "supersede");
+        assert_eq!(value["supersededId"], serde_json::json!(target));
+        // The loser is stamped but still queryable for audit.
+        assert!(storage.superseded_node_ids().unwrap().contains(&target));
+        let loser = storage.get_node(&target).unwrap().unwrap();
+        assert_eq!(loser.content, "Old answer: use port 3927.");
+        assert!(
+            loser.retrieval_strength < before.retrieval_strength,
+            "loser demoted ({} -> {})",
+            before.retrieval_strength,
+            loser.retrieval_strength
+        );
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[tokio::test]
+    async fn test_explicit_supersede_on_protected_target_errors() {
+        let (storage, _dir) = test_storage().await;
+        let target = seed_memory(&storage, "Pinned canonical fact.");
+        storage.set_protected(&target, true).unwrap();
+
+        let args = serde_json::json!({
+            "content": "Attempted replacement.",
+            "supersede": target
+        });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("protected"));
+        assert!(
+            !storage.superseded_node_ids().unwrap().contains(&target),
+            "refusal must not stamp"
+        );
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[tokio::test]
+    async fn test_explicit_supersede_missing_target_errors() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({
+            "content": "Replacement for a ghost.",
+            "supersede": "00000000-0000-0000-0000-000000000000"
+        });
+        assert!(execute(&storage, &test_cognitive(), Some(args)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_explicit_supersede_invalid_id_errors() {
+        let (storage, _dir) = test_storage().await;
+        let args = serde_json::json!({
+            "content": "Replacement.",
+            "supersede": "not-a-uuid"
+        });
+        let result = execute(&storage, &test_cognitive(), Some(args)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid supersede target ID"));
+    }
+
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[tokio::test]
+    async fn test_explicit_supersede_honored_when_mode_off() {
+        let _lock = ENV_LOCK.lock().await;
+        let _guard = EnvVarGuard::set("VESTIGE_SUPERSEDE_MODE", "off");
+
+        let (storage, _dir) = test_storage().await;
+        let target = seed_memory(&storage, "Old canonical answer.");
+
+        let args = serde_json::json!({
+            "content": "New canonical answer.",
+            "supersede": target
+        });
+        let value = execute(&storage, &test_cognitive(), Some(args))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            value["decision"], "supersede",
+            "explicit consent must be honored in every mode, including off"
+        );
+        assert!(storage.superseded_node_ids().unwrap().contains(&target));
+    }
+
+    #[tokio::test]
+    async fn test_batch_smart_policy_yields_no_supersessions() {
+        // v2.2.5 contract: without explicit consent, batch smart-policy items
+        // must come back as suggestions/creates — never decision="supersede".
+        let (storage, _dir) = test_storage().await;
+        let result = execute(
+            &storage,
+            &test_cognitive(),
+            Some(serde_json::json!({
+                "batchMergePolicy": "smart",
+                "items": [
+                    { "content": "Fixed the loader bug, actually the config was wrong." },
+                    { "content": "Fixed the loader bug, actually the manifest was wrong." }
+                ]
+            })),
+        )
+        .await
+        .unwrap();
+
+        for item in result["results"].as_array().unwrap() {
+            assert_ne!(
+                item["decision"], "supersede",
+                "batch smart policy must suggest, not supersede: {item}"
+            );
+            assert!(
+                item["supersededId"].is_null(),
+                "no memory may be superseded without consent: {item}"
+            );
+        }
     }
 }
