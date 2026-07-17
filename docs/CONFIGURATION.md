@@ -45,6 +45,10 @@ Qwen3 currently uses Hugging Face Hub's Candle loader directly, so use the stand
 | `VESTIGE_AUTH_TOKEN` | auto-generated | Dashboard + MCP HTTP bearer auth |
 | `VESTIGE_DASHBOARD_ENABLED` | `false` | Set `true` or `1` to enable the web dashboard |
 | `VESTIGE_CONSOLIDATION_INTERVAL_HOURS` | `6` | FSRS-6 decay cycle cadence |
+| `VESTIGE_AUTO_DEDUP` | off | v2.2.4: opt-in gate for the destructive consolidation auto-dedup pass; only `1`/`true`/`on`/`yes` enables it |
+| `VESTIGE_DEDUP_THRESHOLD` | `0.95` | v2.2.4: auto-dedup cosine threshold, clamped to `0.85..=0.999` |
+| `VESTIGE_SUPERSEDE_MODE` | `suggest` | v2.2.5: consent mode for smart_ingest's gate-driven supersession. `suggest` (default) creates + returns `supersedeCandidate` for explicit confirm; `auto` restores guarded auto-supersede (demote + bitemporal stamp, reversible via dedup undo); `off` never supersedes from the gate. Explicit `supersede='<id>'` is honored in every mode |
+| `VESTIGE_MERGE_MODE` | `suggest` | v2.2.5: consent mode for smart_ingest's Update/Merge silent-append branch. `suggest` (default) creates + returns `mergeCandidate`; `auto` restores the legacy append into the similar memory; `off` creates plainly |
 
 > **Storage location precedence:** `--data-dir <path>` wins over `VESTIGE_DATA_DIR`; if neither is set, Vestige uses your OS's per-user data directory: `~/Library/Application Support/com.vestige.core/` on macOS, `~/.local/share/vestige/core/` on Linux, `%APPDATA%\vestige\core\` on Windows. Custom paths are directories, are created if missing, expand a leading `~`, and store the database at `<dir>/vestige.db`.
 

@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.5] - 2026-07-16 — "Consent to Supersede"
+
+`smart_ingest` no longer auto-supersedes on gate heuristics: it now **suggests**
+(`supersedeCandidate` in the response) and waits for explicit consent; the
+silent merge-append branch gets the same treatment (`mergeCandidate`); and
+every confirmed supersession ends in the dedup tool's enriched, reversible
+end-state (demote + bitemporal stamp + undo-able operation).
+
+Response to the 2026-07-14/15 wrongful-supersession incidents: the Prediction
+Error Gate's `sim >= 0.70 + appears_contradictory` "correction" branch keys on
+keyword heuristics ("actually", "fixed", "not ", "update:", ...) that fix-notes
+and session handoffs trip constantly. **Eight of nine observed firings
+(similarity 0.74–0.86) demoted the WRONG memory** — shared-vocabulary
+neighbors, not corrections. The `sim >= 0.75` Update/Merge branch silently
+appended new content into an existing memory with the same misfire shape.
+
+### Changed — gate-driven supersession now requires consent (DEFAULT CHANGED)
+
+- **`VESTIGE_SUPERSEDE_MODE`** (default **`suggest`** — this is a behavior
+  change from 2.2.4, which always auto-superseded):
+  - `suggest` (default, incl. unset/unrecognized): the new memory is created
+    (`decision: "create"`) and the withheld proposal is returned as
+    `supersedeCandidate` `{id, similarity, contentPreview, nodeType,
+    wouldPassGuards, guardReason, supersedeReason}`. Nothing is demoted or
+    stamped until confirmed.
+  - `auto`: restores automatic supersession, now guarded (below). A guard hit
+    downgrades to the suggest behavior and logs at info.
+  - `off`/`0`/`false`: plain create; the proposal is only noted in `reason`.
+- **`VESTIGE_MERGE_MODE`** (default **`suggest`**, same values) governs the
+  `sim >= 0.75` Update/Merge silent-append branch: `suggest` creates the new
+  memory + `mergeCandidate` `{id, similarity, contentPreview, mergePreview}`;
+  `auto` restores the legacy append; `off` creates plainly. Reinforce at
+  `sim >= 0.92` is untouched — strengthening an existing memory is harmless.
+- **Per-decision guards** (auto mode only; cloned from the auto-dedup guard
+  shape): protected target; `node_type` mismatch; handoff/session-close-tagged
+  target when the new memory is not one; demoted-target branch firing without
+  any contradiction signal. Batch `batchMergePolicy: "smart"` runs the same
+  gate path and inherits everything.
+
+### Changed — every supersede path ends in the enriched, reversible end-state
+
+Previously the gate's auto-supersede only called `demote_memory` — no
+bitemporal stamp, no link, no audit trail. Now every path (gated auto,
+explicit `smart_ingest {supersede}`, `memory {action:'supersede'}`) unifies on
+the dedup tool's machinery: the loser is **demoted + stamped
+`valid_until`/`superseded_by` + still queryable for audit**, and the operation
+is recorded as a reversible `MergeOperation` (`dedup {action:'undo'}` restores
+the stamps; the FSRS demotion is a soft penalty and is not reverted).
+
+### Added — explicit consent surfaces
+
+- `smart_ingest` param **`supersede: "<node-id>"`** (single mode): confirm a
+  suggestion (or supersede any known memory). Honored in every mode and even
+  when the embedding service is down; bypasses the structural guards —
+  explicit consent outranks heuristics — but **protected targets are always
+  refused**, matching `plan_supersede`.
+- `memory` action **`supersede`** (`id` = loser, `winnerId` = replacement):
+  confirm-after-suggest surface with the same end-state; returns the
+  reversible `operationId`.
+- Responses carry the strictly-additive `supersedeCandidate` /
+  `mergeCandidate` keys (single mode and batch per-item), omitted when absent.
+  All existing fields keep their exact shapes, and the decision vocabulary is
+  unchanged ("create" on suggest, "supersede" on confirm) so trace recording
+  needed zero changes.
+
 ## [2.2.4] - 2026-07-13 — "Consent to Consolidate"
 
 Auto-dedup is now opt-in (`VESTIGE_AUTO_DEDUP`) with node-type/provenance/date
