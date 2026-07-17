@@ -130,6 +130,19 @@ pub fn schema() -> Value {
                 "enum": ["any", "valid", "tombstoned"],
                 "description": "Investigation filter: 'any' (default), 'valid' (currently-valid records only), or 'tombstoned' (records no longer visible upstream, kept for audit).",
                 "default": "any"
+            },
+            "created_after": {
+                "type": "string",
+                "description": "Freshness filter (v2.2.8): only memories created at/after this bound (inclusive). YYYY-MM-DD (start of day) or RFC3339. The reliable form of 'what was saved recently' — semantic ranking alone under-serves fresh records."
+            },
+            "created_before": {
+                "type": "string",
+                "description": "Freshness filter (v2.2.8): only memories created at/before this bound (inclusive). YYYY-MM-DD (anchors to end of day) or RFC3339."
+            },
+            "strengthen": {
+                "type": "boolean",
+                "description": "Set false for archival/audit/ranking-only reads: skips the testing-effect strength boost so the scan does not inflate FSRS state (v2.2.8; spaced-access damping applies regardless).",
+                "default": true
             }
         },
         "required": ["query"]
@@ -177,6 +190,12 @@ struct SearchArgs {
     source_updated_before: Option<String>,
     #[serde(alias = "source_status")]
     source_status: Option<String>,
+    // v2.2.8 "Spacing Effect" — freshness controls (recall-freshness fix).
+    #[serde(alias = "created_after")]
+    created_after: Option<String>,
+    #[serde(alias = "created_before")]
+    created_before: Option<String>,
+    strengthen: Option<bool>,
 }
 
 /// Execute unified search with 7-stage cognitive pipeline.
@@ -245,6 +264,34 @@ pub async fn execute(
     // both the concrete and hybrid paths). Hard-errors on malformed input.
     let source_filter = SourceFilter::from_args(&args)?;
 
+    // v2.2.8 — freshness filters on created_at, shared by both paths.
+    // Hard-error on malformed input, same rationale as SourceFilter.
+    let created_after = args
+        .created_after
+        .as_deref()
+        .map(|s| super::maintenance::parse_date_bound("created_after", s, false))
+        .transpose()?;
+    let created_before = args
+        .created_before
+        .as_deref()
+        .map(|s| super::maintenance::parse_date_bound("created_before", s, true))
+        .transpose()?;
+    if let (Some(a), Some(b)) = (&created_after, &created_before)
+        && a > b
+    {
+        return Err(format!(
+            "'created_after' ({}) is after 'created_before' ({}) — empty range.",
+            a.to_rfc3339(),
+            b.to_rfc3339()
+        ));
+    }
+    let created_filter_active = created_after.is_some() || created_before.is_some();
+    let node_in_created_range = |node: &vestige_core::KnowledgeNode| -> bool {
+        !(created_after.is_some_and(|dt| node.created_at < dt)
+            || created_before.is_some_and(|dt| node.created_at > dt))
+    };
+    let strengthen_enabled = args.strengthen.unwrap_or(true);
+
     let concrete = args
         .concrete
         .unwrap_or_else(|| is_literal_query(&args.query));
@@ -253,11 +300,12 @@ pub async fn execute(
         // pool so the post-filter has enough headroom to still return ~limit
         // results after thinning. Cap at the same upper bound the underlying
         // SQL path uses elsewhere (100).
-        let concrete_fetch_limit = if args.tag_prefix.is_some() || source_filter.is_active() {
-            (limit * 3).min(100)
-        } else {
-            limit
-        };
+        let concrete_fetch_limit =
+            if args.tag_prefix.is_some() || source_filter.is_active() || created_filter_active {
+                (limit * 3).min(100)
+            } else {
+                limit
+            };
         let results = storage
             .concrete_search_filtered(
                 &args.query,
@@ -277,6 +325,7 @@ pub async fn execute(
                 None => true,
             })
             .filter(|r| node_matches_source(&r.node, &source_filter))
+            .filter(|r| node_in_created_range(&r.node))
             .take(limit as usize)
             .collect();
 
@@ -284,7 +333,12 @@ pub async fn execute(
             .iter()
             .map(|r| r.node.id.as_str())
             .collect();
-        let _ = storage.strengthen_batch_on_access(&ids);
+        let strengthening = if strengthen_enabled {
+            let (spaced, massed) = storage.strengthen_batch_on_access(&ids).unwrap_or((0, 0));
+            serde_json::json!({ "strengthened": spaced, "massedDamped": massed })
+        } else {
+            serde_json::json!({ "skipped": true })
+        };
 
         let mut formatted: Vec<Value> = filtered_results
             .iter()
@@ -325,6 +379,7 @@ pub async fn execute(
             "detailLevel": detail_level,
             "profile": output_config.profile.as_str(),
             "total": formatted.len(),
+            "strengthening": strengthening,
             "results": formatted,
         });
 
@@ -393,11 +448,12 @@ pub async fn execute(
     // When a tag_prefix OR source filter is requested, double the overfetch
     // (capped at the same 100 ceiling) so the post-filter has enough headroom
     // to still return ~limit results after thinning.
-    let post_filter_multiplier = if args.tag_prefix.is_some() || source_filter.is_active() {
-        2
-    } else {
-        1
-    };
+    let post_filter_multiplier =
+        if args.tag_prefix.is_some() || source_filter.is_active() || created_filter_active {
+            2
+        } else {
+            1
+        };
     let overfetch_limit = (limit * overfetch_multiplier * post_filter_multiplier).min(100); // Cap at 100 to avoid excessive DB load
 
     let results = storage
@@ -439,6 +495,12 @@ pub async fn execute(
     if source_filter.is_active() {
         filtered_results.retain(|r| node_matches_source(&r.node, &source_filter));
     }
+    // v2.2.8 — freshness post-filter (same precedent). Runs BEFORE the
+    // reranker/truncation, so date-scoped queries never lose fresh records
+    // to higher-scoring out-of-range semantic magnets.
+    if created_filter_active {
+        filtered_results.retain(|r| node_in_created_range(&r.node));
+    }
 
     // ====================================================================
     // Dedup: merge Stage 0 keyword-priority results into Stage 1 results
@@ -453,6 +515,10 @@ pub async fn execute(
         }
         // Respect the source filter on re-inject for the same reason.
         if source_filter.is_active() && !node_matches_source(&kp.node, &source_filter) {
+            continue;
+        }
+        // Respect the freshness filter on re-inject for the same reason.
+        if created_filter_active && !node_in_created_range(&kp.node) {
             continue;
         }
         if let Some(existing) = filtered_results
@@ -738,12 +804,19 @@ pub async fn execute(
 
     // ====================================================================
     // Auto-strengthen on access (Testing Effect)
+    // v2.2.8: skippable via strengthen=false (archival/audit reads); spaced
+    // vs. massed counts surfaced in the response for observability.
     // ====================================================================
-    let ids: Vec<&str> = filtered_results
-        .iter()
-        .map(|r| r.node.id.as_str())
-        .collect();
-    let _ = storage.strengthen_batch_on_access(&ids);
+    let strengthening = if strengthen_enabled {
+        let ids: Vec<&str> = filtered_results
+            .iter()
+            .map(|r| r.node.id.as_str())
+            .collect();
+        let (spaced, massed) = storage.strengthen_batch_on_access(&ids).unwrap_or((0, 0));
+        serde_json::json!({ "strengthened": spaced, "massedDamped": massed })
+    } else {
+        serde_json::json!({ "skipped": true })
+    };
 
     // Drop storage lock before acquiring cognitive for side effects
 
@@ -833,6 +906,7 @@ pub async fn execute(
         "detailLevel": detail_level,
         "profile": output_config.profile.as_str(),
         "total": formatted.len(),
+        "strengthening": strengthening,
         "results": formatted,
     });
 
@@ -2544,5 +2618,214 @@ mod tests {
         if let Some(first) = value["results"].as_array().and_then(|a| a.first()) {
             assert!(first.get("createdAt").is_some(), "default keeps timestamps");
         }
+    }
+
+    // ========================================================================
+    // FRESHNESS FILTERS + STRENGTHEN OPT-OUT (v2.2.8)
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_created_after_filters_results() {
+        let (storage, _dir) = test_storage().await;
+        ingest_test_content(&storage, "freshness filter zebra memory").await;
+
+        // Bound in the far future excludes everything.
+        let args = serde_json::json!({
+            "query": "zebra", "created_after": "2999-01-01", "min_similarity": 0.0
+        });
+        let value = execute(
+            &storage,
+            &test_cognitive(),
+            &OutputConfig::default(),
+            Some(args),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            value["results"].as_array().unwrap().len(),
+            0,
+            "future created_after must exclude everything"
+        );
+
+        // Bound in the far past includes the memory (RFC3339 form).
+        let args = serde_json::json!({
+            "query": "zebra", "created_after": "1990-01-01T00:00:00Z", "min_similarity": 0.0
+        });
+        let value = execute(
+            &storage,
+            &test_cognitive(),
+            &OutputConfig::default(),
+            Some(args),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !value["results"].as_array().unwrap().is_empty(),
+            "past created_after must include the memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_created_before_filters_results() {
+        let (storage, _dir) = test_storage().await;
+        ingest_test_content(&storage, "freshness filter walrus memory").await;
+
+        let args = serde_json::json!({
+            "query": "walrus", "created_before": "1990-01-01", "min_similarity": 0.0
+        });
+        let value = execute(
+            &storage,
+            &test_cognitive(),
+            &OutputConfig::default(),
+            Some(args),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            value["results"].as_array().unwrap().len(),
+            0,
+            "past created_before must exclude everything"
+        );
+
+        let args = serde_json::json!({
+            "query": "walrus", "created_before": "2999-12-31", "min_similarity": 0.0
+        });
+        let value = execute(
+            &storage,
+            &test_cognitive(),
+            &OutputConfig::default(),
+            Some(args),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !value["results"].as_array().unwrap().is_empty(),
+            "future created_before must include the memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_created_range_validation_errors() {
+        let (storage, _dir) = test_storage().await;
+
+        let args = serde_json::json!({
+            "query": "anything", "created_after": "2999-01-01", "created_before": "1990-01-01"
+        });
+        let err = execute(
+            &storage,
+            &test_cognitive(),
+            &OutputConfig::default(),
+            Some(args),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("empty range"), "got: {err}");
+
+        let args = serde_json::json!({ "query": "anything", "created_after": "not a date" });
+        let err = execute(
+            &storage,
+            &test_cognitive(),
+            &OutputConfig::default(),
+            Some(args),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("Invalid created_after"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_created_after_applies_to_concrete_path() {
+        let (storage, _dir) = test_storage().await;
+        ingest_test_content(&storage, "UNIQUE_CONCRETE_TOKEN_XYZZY memory").await;
+
+        // Quoted query forces the concrete path.
+        let args = serde_json::json!({
+            "query": "\"UNIQUE_CONCRETE_TOKEN_XYZZY\"", "created_after": "2999-01-01"
+        });
+        let value = execute(
+            &storage,
+            &test_cognitive(),
+            &OutputConfig::default(),
+            Some(args),
+        )
+        .await
+        .unwrap();
+        assert_eq!(value["method"], "concrete");
+        assert_eq!(
+            value["results"].as_array().unwrap().len(),
+            0,
+            "future created_after must exclude concrete matches too"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_strengthen_false_skips_testing_effect() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_test_content(&storage, "strengthen opt-out quokka memory").await;
+
+        // Capture the ingest-time access stamp; an archival read must not move it.
+        let before = storage.get_node(&id).unwrap().unwrap();
+
+        let args = serde_json::json!({
+            "query": "quokka", "strengthen": false, "min_similarity": 0.0
+        });
+        let value = execute(
+            &storage,
+            &test_cognitive(),
+            &OutputConfig::default(),
+            Some(args),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !value["results"].as_array().unwrap().is_empty(),
+            "sanity: the memory must be found"
+        );
+        assert_eq!(value["strengthening"]["skipped"], true);
+
+        // The archival read must leave no access trace on FSRS state.
+        let after = storage.get_node(&id).unwrap().unwrap();
+        assert_eq!(
+            after.last_accessed, before.last_accessed,
+            "strengthen=false must not touch last_accessed"
+        );
+        assert_eq!(
+            after.retrieval_strength, before.retrieval_strength,
+            "strengthen=false must not touch retrieval_strength"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_strengthening_reports_massed_damping() {
+        // Ingest stamps last_accessed, so a freshly-saved memory is inside
+        // the refractory window and its first recall must be reported as
+        // massed-damped (no boost — it is at strength 1.0 anyway). The
+        // spaced-vs-massed transition itself is unit-tested at the storage
+        // layer, where the access stamp can be backdated.
+        let (storage, _dir) = test_storage().await;
+        ingest_test_content(&storage, "massed damping capybara memory").await;
+
+        let args = serde_json::json!({ "query": "capybara", "min_similarity": 0.0 });
+        let value = execute(
+            &storage,
+            &test_cognitive(),
+            &OutputConfig::default(),
+            Some(args),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !value["results"].as_array().unwrap().is_empty(),
+            "sanity: the memory must be found"
+        );
+        assert!(
+            value["strengthening"]["massedDamped"].as_u64().unwrap() >= 1,
+            "same-window recall must be damped: {:?}",
+            value["strengthening"]
+        );
+        assert_eq!(
+            value["strengthening"]["strengthened"], 0,
+            "no spaced accesses expected within the ingest window"
+        );
     }
 }

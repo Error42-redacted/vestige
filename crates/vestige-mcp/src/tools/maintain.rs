@@ -49,8 +49,8 @@ pub fn schema() -> Value {
             // --- export ---
             "format": { "type": "string", "enum": ["json", "jsonl"], "description": "[export] Output format." },
             "tags": { "type": "array", "items": { "type": "string" }, "description": "[export] Tag filter." },
-            "start": { "type": "string", "description": "[export] Start date filter (ISO 8601)." },
-            "end": { "type": "string", "description": "[export] End date filter (ISO 8601)." },
+            "start": { "type": "string", "description": "[export] Start date filter, inclusive on createdAt. YYYY-MM-DD (start of day) or RFC3339 timestamp. 'since' is accepted as a legacy alias." },
+            "end": { "type": "string", "description": "[export] End date filter, inclusive on createdAt. YYYY-MM-DD (anchors to end of day) or RFC3339 timestamp." },
             // --- backup / restore ---
             "path": { "type": "string", "description": "[restore] Path to a JSON backup file (path-confined)." }
         },

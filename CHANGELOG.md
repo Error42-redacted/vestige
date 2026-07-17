@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.8] - 2026-07-17 — "Spacing Effect"
+
+Two long-open retrieval bugs from the 2026-07-15 recall-freshness postmortem.
+Root cause of the staleness: `strengthen_on_access` granted the full testing-
+effect boost (+0.05 retrieval / +0.02 retention) on **every** lookup hit and
+also reinforced the top-5 semantic neighbors ≥0.7 similarity — so rolling
+handoff records hit at every session start compounded strength daily and
+dragged their whole vocabulary cluster up with them (rich-get-richer), while
+competition suppression then hid fresher topical records.
+
+### Changed — only spaced accesses strengthen (Cepeda et al. 2006)
+
+- `strengthen_on_access` now checks the node's previous `last_accessed`:
+  re-accesses inside the refractory window (default 12h,
+  `VESTIGE_STRENGTHEN_REFRACTORY_HOURS`, `0` disables damping) update
+  bookkeeping (last_accessed, times_retrieved, access log) but earn **no
+  strength boost and no neighbor reinforcement**. Massed repetition adds
+  ~no stability; spaced repetition does — the code now agrees with the
+  cognitive science it cites.
+- `recall`/`search` responses include a `strengthening` block
+  (`{strengthened, massedDamped}` or `{skipped: true}`) so damping is
+  observable live.
+
+### Added — freshness controls on recall
+
+- `created_after` / `created_before` params (YYYY-MM-DD or RFC3339,
+  inclusive; date-only upper bounds anchor to end-of-day): deterministic
+  date-scoped retrieval — the reliable form of "what was saved recently".
+  Applied before rerank/truncation in the hybrid path, and in the concrete
+  path; keyword-priority re-injection respects them.
+- `strengthen: false` param: archival/audit/ranking-only reads that leave
+  no access trace on FSRS state.
+
+### Fixed — export start/end date filters were a no-op
+
+- `maintain {action:"export"}` advertised `start`/`end` in its schema but
+  the handler only deserialized the legacy `since` field, so serde silently
+  dropped both params and every export returned all memories. `start`/`end`
+  now parse (YYYY-MM-DD or RFC3339), filter inclusively on `created_at`,
+  reject inverted ranges, and are echoed back in an `appliedFilters` block.
+  `since` remains as a legacy alias for `start`; portable export rejects
+  all filters explicitly.
+
 ## [2.2.7] - 2026-07-16 — "Know Thyself"
 
 The 2.2.5 and 2.2.6 deploys could only be verified by SHA-256 hashing the

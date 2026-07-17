@@ -414,8 +414,36 @@ pub async fn execute_backup(storage: &Arc<Storage>, _args: Option<Value>) -> Res
 struct ExportArgs {
     format: Option<String>,
     tags: Option<Vec<String>>,
+    /// Legacy alias for `start` (pre-v2.2.8 name; date-only YYYY-MM-DD).
     since: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
     path: Option<String>,
+}
+
+/// Parse a date bound: an RFC3339 timestamp or a date-only YYYY-MM-DD.
+/// Date-only values anchor to start-of-day for lower bounds and end-of-day
+/// for upper bounds, so an upper bound of "2026-07-14" includes that whole
+/// day. Shared by export (start/end) and recall (created_after/created_before).
+pub(crate) fn parse_date_bound(
+    field: &str,
+    date_str: &str,
+    end_of_day: bool,
+) -> Result<chrono::DateTime<Utc>, String> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(date_str) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+    let naive = NaiveDate::parse_from_str(date_str, "%Y-%m-%d").map_err(|_| {
+        format!(
+            "Invalid {field} '{date_str}'. Use YYYY-MM-DD or an RFC3339 timestamp (e.g. 2026-07-14T12:00:00Z)."
+        )
+    })?;
+    let time = if end_of_day {
+        naive.and_hms_nano_opt(23, 59, 59, 999_999_999).unwrap()
+    } else {
+        naive.and_hms_opt(0, 0, 0).unwrap()
+    };
+    Ok(time.and_utc())
 }
 
 /// Export tool
@@ -426,6 +454,8 @@ pub async fn execute_export(storage: &Arc<Storage>, args: Option<Value>) -> Resu
             format: None,
             tags: None,
             since: None,
+            start: None,
+            end: None,
             path: None,
         },
     };
@@ -439,9 +469,14 @@ pub async fn execute_export(storage: &Arc<Storage>, args: Option<Value>) -> Resu
     }
 
     if format == "portable" {
-        if args.tags.as_ref().is_some_and(|tags| !tags.is_empty()) || args.since.is_some() {
+        if args.tags.as_ref().is_some_and(|tags| !tags.is_empty())
+            || args.since.is_some()
+            || args.start.is_some()
+            || args.end.is_some()
+        {
             return Err(
-                "Portable export is exact and does not support tags or since filters.".to_string(),
+                "Portable export is exact and does not support tags, start, end, or since filters."
+                    .to_string(),
             );
         }
 
@@ -485,15 +520,36 @@ pub async fn execute_export(storage: &Arc<Storage>, args: Option<Value>) -> Resu
         }));
     }
 
-    // Parse since date
-    let since_date = match &args.since {
-        Some(date_str) => {
-            let naive = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
-                .map_err(|e| format!("Invalid date '{}': {}. Use YYYY-MM-DD.", date_str, e))?;
-            Some(naive.and_hms_opt(0, 0, 0).unwrap().and_utc())
+    // Date-range filters: `start`/`end` (the params the tool schema
+    // advertises) with `since` kept as a legacy alias for `start`. Both
+    // bounds are inclusive on created_at.
+    let (start_field, start_str) = match (&args.start, &args.since) {
+        (Some(_), Some(_)) => {
+            return Err(
+                "Pass either 'start' or 'since' (legacy alias for 'start'), not both.".to_string(),
+            );
         }
-        None => None,
+        (Some(s), None) => ("start", Some(s.as_str())),
+        (None, Some(s)) => ("since", Some(s.as_str())),
+        (None, None) => ("start", None),
     };
+    let start_date = start_str
+        .map(|s| parse_date_bound(start_field, s, false))
+        .transpose()?;
+    let end_date = args
+        .end
+        .as_deref()
+        .map(|s| parse_date_bound("end", s, true))
+        .transpose()?;
+    if let (Some(s), Some(e)) = (&start_date, &end_date)
+        && s > e
+    {
+        return Err(format!(
+            "'start' ({}) is after 'end' ({}) — empty range.",
+            s.to_rfc3339(),
+            e.to_rfc3339()
+        ));
+    }
 
     let tag_filter: Vec<String> = args.tags.unwrap_or_default();
 
@@ -518,9 +574,15 @@ pub async fn execute_export(storage: &Arc<Storage>, args: Option<Value>) -> Resu
     let filtered: Vec<&vestige_core::KnowledgeNode> = all_nodes
         .iter()
         .filter(|node| {
-            if since_date
+            if start_date
                 .as_ref()
-                .is_some_and(|since_dt| node.created_at < *since_dt)
+                .is_some_and(|start_dt| node.created_at < *start_dt)
+            {
+                return false;
+            }
+            if end_date
+                .as_ref()
+                .is_some_and(|end_dt| node.created_at > *end_dt)
             {
                 return false;
             }
@@ -602,6 +664,11 @@ pub async fn execute_export(storage: &Arc<Storage>, args: Option<Value>) -> Resu
         "format": format,
         "memoriesExported": filtered.len(),
         "totalMemories": all_nodes.len(),
+        "appliedFilters": {
+            "start": start_date.map(|d| d.to_rfc3339()),
+            "end": end_date.map(|d| d.to_rfc3339()),
+            "tags": tag_filter,
+        },
         "sizeBytes": file_size,
     }))
 }
@@ -1054,5 +1121,154 @@ mod tests {
             vestige_core::PORTABLE_ARCHIVE_FORMAT
         );
         assert!(result["rowsExported"].as_u64().unwrap() > 0);
+    }
+
+    fn ingest_test_memory(storage: &Arc<Storage>, content: &str) {
+        storage
+            .ingest(vestige_core::IngestInput {
+                content: content.to_string(),
+                node_type: "fact".to_string(),
+                source: None,
+                sentiment_score: 0.0,
+                sentiment_magnitude: 0.0,
+                tags: vec![],
+                valid_from: None,
+                valid_until: None,
+                source_envelope: None,
+            })
+            .unwrap();
+    }
+
+    async fn export_count(storage: &Arc<Storage>, args: serde_json::Value) -> u64 {
+        let result = execute_export(storage, Some(args)).await.unwrap();
+        result["memoriesExported"].as_u64().unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_export_start_end_filters_apply() {
+        let (storage, _dir) = test_storage().await;
+        ingest_test_memory(&storage, "export date filter test memory one");
+        ingest_test_memory(&storage, "export date filter test memory two");
+
+        // Wide-open range includes everything.
+        let n = export_count(
+            &storage,
+            serde_json::json!({ "start": "1990-01-01", "end": "2999-12-31", "path": "wide.json" }),
+        )
+        .await;
+        assert_eq!(n, 2, "wide start/end range must include both memories");
+
+        // start in the far future excludes everything — this is the exact
+        // 2026-07-15 bug shape: previously 'start' was silently dropped and
+        // ALL memories exported.
+        let n = export_count(
+            &storage,
+            serde_json::json!({ "start": "2999-01-01", "path": "future-start.json" }),
+        )
+        .await;
+        assert_eq!(n, 0, "future start must exclude everything");
+
+        // end in the far past excludes everything.
+        let n = export_count(
+            &storage,
+            serde_json::json!({ "end": "1990-01-01", "path": "past-end.json" }),
+        )
+        .await;
+        assert_eq!(n, 0, "past end must exclude everything");
+    }
+
+    #[tokio::test]
+    async fn test_export_rfc3339_bounds_accepted() {
+        let (storage, _dir) = test_storage().await;
+        ingest_test_memory(&storage, "export rfc3339 test memory");
+
+        let result = execute_export(
+            &storage,
+            Some(serde_json::json!({
+                "start": "2999-01-01T00:00:00Z",
+                "path": "rfc-start.json"
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["memoriesExported"], 0);
+        // The applied bound is echoed back for observability.
+        assert!(
+            result["appliedFilters"]["start"]
+                .as_str()
+                .unwrap()
+                .starts_with("2999-01-01"),
+            "appliedFilters.start must echo the parsed bound: {:?}",
+            result["appliedFilters"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_export_since_is_legacy_alias_for_start() {
+        let (storage, _dir) = test_storage().await;
+        ingest_test_memory(&storage, "export since alias test memory");
+
+        let n = export_count(
+            &storage,
+            serde_json::json!({ "since": "1990-01-01", "path": "since-past.json" }),
+        )
+        .await;
+        assert_eq!(n, 1, "past 'since' must include the memory");
+
+        let n = export_count(
+            &storage,
+            serde_json::json!({ "since": "2999-01-01", "path": "since-future.json" }),
+        )
+        .await;
+        assert_eq!(n, 0, "future 'since' must exclude the memory");
+
+        let err = execute_export(
+            &storage,
+            Some(serde_json::json!({ "since": "1990-01-01", "start": "1990-01-01" })),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("not both"),
+            "since+start together must error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_export_invalid_dates_and_inverted_range_error() {
+        let (storage, _dir) = test_storage().await;
+
+        let err = execute_export(&storage, Some(serde_json::json!({ "start": "July 14" })))
+            .await
+            .unwrap_err();
+        assert!(err.contains("Invalid start"), "got: {err}");
+
+        let err = execute_export(&storage, Some(serde_json::json!({ "end": "nope" })))
+            .await
+            .unwrap_err();
+        assert!(err.contains("Invalid end"), "got: {err}");
+
+        let err = execute_export(
+            &storage,
+            Some(serde_json::json!({ "start": "2999-01-01", "end": "1990-01-01" })),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("empty range"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_portable_export_rejects_date_filters() {
+        let (storage, _dir) = test_storage().await;
+        let err = execute_export(
+            &storage,
+            Some(serde_json::json!({ "format": "portable", "start": "2026-01-01" })),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("does not support"),
+            "portable + start must be rejected: {err}"
+        );
     }
 }

@@ -1927,33 +1927,91 @@ impl SqliteMemoryStore {
     /// Implements the Testing Effect (Roediger & Karpicke 2006) + v1.4.0
     /// content-aware cross-memory reinforcement: semantically similar neighbors
     /// receive a diminished boost proportional to cosine similarity.
-    pub fn strengthen_on_access(&self, id: &str) -> Result<()> {
+    ///
+    /// v2.2.8 "Spacing Effect": only SPACED accesses strengthen. A re-access
+    /// inside the refractory window (default 12h, `VESTIGE_STRENGTHEN_REFRACTORY_HOURS`,
+    /// 0 disables damping) still updates access bookkeeping (last_accessed,
+    /// times_retrieved, access log) but earns no strength boost and no
+    /// neighbor reinforcement — massed repetition adds ~no stability
+    /// (Cepeda et al. 2006; FSRS same-day review behavior). This closes the
+    /// 2026-07-15 recall-freshness postmortem's rich-get-richer loop, where
+    /// rolling handoffs hit at every session start compounded +0.05/access
+    /// and dragged their whole semantic cluster up with them.
+    ///
+    /// Returns `true` when the access was spaced (boosts applied).
+    pub fn strengthen_on_access(&self, id: &str) -> Result<bool> {
         let now = Utc::now();
 
-        // Primary boost on the accessed node
-        {
+        let refractory_hours: i64 = std::env::var("VESTIGE_STRENGTHEN_REFRACTORY_HOURS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(12)
+            .max(0);
+
+        // Primary boost on the accessed node (bookkeeping-only when massed)
+        let spaced = {
             let writer = self
                 .writer
                 .lock()
                 .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
-            writer.execute(
-                "UPDATE knowledge_nodes SET
-                    last_accessed = ?1,
-                    retrieval_strength = MIN(1.0, retrieval_strength + 0.05),
-                    retention_strength = MIN(1.0, retention_strength + 0.02),
-                    times_retrieved = COALESCE(times_retrieved, 0) + 1,
-                    utility_score = CASE
-                        WHEN COALESCE(times_retrieved, 0) + 1 > 0
-                        THEN CAST(COALESCE(times_useful, 0) AS REAL) / (COALESCE(times_retrieved, 0) + 1)
-                        ELSE 0.0
-                    END
-                WHERE id = ?2",
-                params![now.to_rfc3339(), id],
-            )?;
-        }
+
+            let prior_access: Option<Option<String>> = writer
+                .query_row(
+                    "SELECT last_accessed FROM knowledge_nodes WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let spaced = match prior_access
+                .flatten()
+                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+            {
+                Some(prev) => {
+                    now.signed_duration_since(prev.with_timezone(&Utc))
+                        >= Duration::hours(refractory_hours)
+                }
+                None => true,
+            };
+
+            if spaced {
+                writer.execute(
+                    "UPDATE knowledge_nodes SET
+                        last_accessed = ?1,
+                        retrieval_strength = MIN(1.0, retrieval_strength + 0.05),
+                        retention_strength = MIN(1.0, retention_strength + 0.02),
+                        times_retrieved = COALESCE(times_retrieved, 0) + 1,
+                        utility_score = CASE
+                            WHEN COALESCE(times_retrieved, 0) + 1 > 0
+                            THEN CAST(COALESCE(times_useful, 0) AS REAL) / (COALESCE(times_retrieved, 0) + 1)
+                            ELSE 0.0
+                        END
+                    WHERE id = ?2",
+                    params![now.to_rfc3339(), id],
+                )?;
+            } else {
+                writer.execute(
+                    "UPDATE knowledge_nodes SET
+                        last_accessed = ?1,
+                        times_retrieved = COALESCE(times_retrieved, 0) + 1,
+                        utility_score = CASE
+                            WHEN COALESCE(times_retrieved, 0) + 1 > 0
+                            THEN CAST(COALESCE(times_useful, 0) AS REAL) / (COALESCE(times_retrieved, 0) + 1)
+                            ELSE 0.0
+                        END
+                    WHERE id = ?2",
+                    params![now.to_rfc3339(), id],
+                )?;
+            }
+            spaced
+        };
 
         // Log access for ACT-R activation computation
         let _ = self.log_access(id, "search_hit");
+
+        // Massed access: bookkeeping done, no boosts, no neighbor reinforcement.
+        if !spaced {
+            return Ok(false);
+        }
 
         // Content-aware cross-memory reinforcement: boost semantically similar neighbors
         #[cfg(all(feature = "embeddings", feature = "vector-search"))]
@@ -1993,17 +2051,27 @@ impl SqliteMemoryStore {
             }
         }
 
-        Ok(())
+        Ok(true)
     }
 
-    /// Batch strengthen multiple memories on access
-    pub fn strengthen_batch_on_access(&self, ids: &[&str]) -> Result<()> {
+    /// Batch strengthen multiple memories on access.
+    ///
+    /// Returns `(spaced, massed)` counts — how many accesses earned a
+    /// strength boost vs. were damped by the spacing-effect refractory
+    /// window (v2.2.8).
+    pub fn strengthen_batch_on_access(&self, ids: &[&str]) -> Result<(usize, usize)> {
+        let mut spaced = 0_usize;
+        let mut massed = 0_usize;
         for id in ids {
-            self.strengthen_on_access(id)?;
+            if self.strengthen_on_access(id)? {
+                spaced += 1;
+            } else {
+                massed += 1;
+            }
             // Also record access in memory_states for audit trail (Bug #1 fix)
             let _ = self.record_memory_access(id);
         }
-        Ok(())
+        Ok((spaced, massed))
     }
 
     /// Mark a memory as "useful" — called when a retrieved memory is subsequently
@@ -15244,5 +15312,127 @@ mod tests {
             assert!(storage.get_node(ghost).unwrap().is_none());
             assert!(storage.get_deletion_tombstone(ghost).unwrap().is_none());
         });
+    }
+
+    // ============== Spacing effect on access (v2.2.8) ==================
+
+    #[test]
+    fn test_strengthen_spacing_effect_refractory_window() {
+        let storage = create_test_storage();
+        let node = storage
+            .ingest(IngestInput {
+                content: "spacing effect refractory test memory".to_string(),
+                node_type: "fact".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        // Lower strengths off the 1.0 ceiling so boosts are observable, and
+        // backdate last_accessed (ingest stamps it = now, and the column is
+        // NOT NULL) so the first access counts as spaced.
+        {
+            let writer = storage.writer.lock().unwrap();
+            let two_days_ago = (Utc::now() - Duration::days(2)).to_rfc3339();
+            writer
+                .execute(
+                    "UPDATE knowledge_nodes SET retrieval_strength = 0.5,
+                        retention_strength = 0.5, last_accessed = ?1
+                     WHERE id = ?2",
+                    params![two_days_ago, node.id],
+                )
+                .unwrap();
+        }
+
+        // First access: prior access is outside the window → spaced → boosts apply.
+        assert!(storage.strengthen_on_access(&node.id).unwrap());
+        let after_first = storage.get_node(&node.id).unwrap().unwrap();
+        assert!(
+            after_first.retrieval_strength > 0.5,
+            "spaced access must boost retrieval_strength, got {}",
+            after_first.retrieval_strength
+        );
+
+        // Immediate re-access: inside the refractory window → massed → no
+        // further boost. This is the rich-get-richer loop from the
+        // 2026-07-15 recall-freshness postmortem.
+        assert!(!storage.strengthen_on_access(&node.id).unwrap());
+        let after_massed = storage.get_node(&node.id).unwrap().unwrap();
+        assert!(
+            (after_massed.retrieval_strength - after_first.retrieval_strength).abs() < 1e-9,
+            "massed access must not boost: {} -> {}",
+            after_first.retrieval_strength,
+            after_massed.retrieval_strength
+        );
+        assert!(
+            (after_massed.retention_strength - after_first.retention_strength).abs() < 1e-9,
+            "massed access must not boost retention"
+        );
+
+        // Batch reports the damping: same-window re-access counts as massed.
+        let (spaced, massed) = storage.strengthen_batch_on_access(&[&node.id]).unwrap();
+        assert_eq!((spaced, massed), (0, 1));
+
+        // Backdate last_accessed beyond the window → spaced again → boosts.
+        {
+            let writer = storage.writer.lock().unwrap();
+            let two_days_ago = (Utc::now() - Duration::days(2)).to_rfc3339();
+            writer
+                .execute(
+                    "UPDATE knowledge_nodes SET last_accessed = ?1 WHERE id = ?2",
+                    params![two_days_ago, node.id],
+                )
+                .unwrap();
+        }
+        assert!(storage.strengthen_on_access(&node.id).unwrap());
+        let after_spaced = storage.get_node(&node.id).unwrap().unwrap();
+        assert!(
+            after_spaced.retrieval_strength > after_massed.retrieval_strength,
+            "spaced access after the window must boost again"
+        );
+    }
+
+    #[test]
+    fn test_strengthen_massed_access_still_updates_bookkeeping() {
+        let storage = create_test_storage();
+        let node = storage
+            .ingest(IngestInput {
+                content: "spacing effect bookkeeping test memory".to_string(),
+                node_type: "fact".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        {
+            let writer = storage.writer.lock().unwrap();
+            let two_days_ago = (Utc::now() - Duration::days(2)).to_rfc3339();
+            writer
+                .execute(
+                    "UPDATE knowledge_nodes SET last_accessed = ?1, times_retrieved = 0
+                     WHERE id = ?2",
+                    params![two_days_ago, node.id],
+                )
+                .unwrap();
+        }
+
+        // Two back-to-back accesses: first spaced, second massed.
+        assert!(storage.strengthen_on_access(&node.id).unwrap());
+        let t1 = storage.get_node(&node.id).unwrap().unwrap().last_accessed;
+        assert!(!storage.strengthen_on_access(&node.id).unwrap());
+        let after = storage.get_node(&node.id).unwrap().unwrap();
+
+        // last_accessed still advances on the massed access (it IS an access).
+        assert!(after.last_accessed >= t1);
+
+        // times_retrieved counts both accesses.
+        let times_retrieved: i64 = {
+            let writer = storage.writer.lock().unwrap();
+            writer
+                .query_row(
+                    "SELECT COALESCE(times_retrieved, 0) FROM knowledge_nodes WHERE id = ?1",
+                    params![node.id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(times_retrieved, 2);
     }
 }
