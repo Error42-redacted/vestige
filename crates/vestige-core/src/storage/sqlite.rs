@@ -4216,11 +4216,6 @@ impl SqliteMemoryStore {
         // 6. Prune old access log entries (keep 90 days)
         let _ = self.prune_access_log();
 
-        // 6.5. Prune old Black Box trace events (keep 30 days by default;
-        // VESTIGE_TRACE_RETENTION_DAYS overrides, 0 = keep forever). Best-effort
-        // like the access-log sweep: a failure never blocks consolidation.
-        let _ = self.prune_agent_traces();
-
         // 7. Optimize w20 if enough usage data
         let w20_optimized = self.optimize_w20_if_ready().unwrap_or(None);
 
