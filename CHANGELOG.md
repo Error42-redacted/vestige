@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.9] - 2026-08-07 — "Convergent Evolution"
+
+The upstream borrow wave: upstream v2.3.0's bugfix tier folded into the local
+lineage (selective cherry-picks off `samvallad33/vestige`; declined features —
+Cognitive Observatory, Black Box tracing, zero-knowledge cloud sync — stay
+out), plus the long-requested retag surface. Named for the independent
+upstream user who hit the same bugs and the same fix philosophy we did.
+
+### Added — tags editable via `memory` action=`edit`
+
+- `memory` action=`edit` accepts a `tags` array alongside or instead of
+  `content`: replaces the full tag array while preserving FSRS state, content,
+  and the embedding; the FTS keyword index syncs via trigger. `[]` clears all
+  tags; tags are trimmed, empties dropped, exact duplicates removed, casing
+  untouched. Closes the "tags not editable via MCP API" gap that blocked the
+  retag worklist.
+
+### Fixed — upstream #139 (29-bug backend audit, cherry-picked)
+
+- Migrations run in a transaction: a mid-migration failure rolls back cleanly
+  instead of bricking the DB on a half-applied `ADD COLUMN`.
+- `suppress` reverse is a true inverse (was leaving stability permanently
+  halved); `update_node_content` flips `has_embedding=0` when the embedder
+  isn't ready (stale embeddings now regenerate); `plan_merge` validates
+  `survivor_id` (was an unchecked-unwrap panic).
+- Contradiction heuristic requires a real polarity flip — benign "do not"
+  notes no longer read as corrections (ported into the local consent-gate's
+  shared `detect_contradiction`).
+- Hybrid search relevance is the min-max-normalized RRF fused score (best
+  match ranks first). UTF-8 boundary panics fixed in the intention parser and
+  `contains_marker_word`; `smart_ingest` batch honors an explicit
+  `forceCreate:false`; backup no longer fails on encrypted DBs; bare "500"
+  dropped from the strong failure markers (matched "$500" / "line 500" —
+  applied to the local STRONG/WEAK two-tier system, which stays).
+
+### Fixed — upstream #141 (10-bug audit, cherry-picked) + V19/V20
+
+- FTS5 sanitizer no longer leaks bare operators on doubled input (query abort
+  / silent AND→OR flip). Unbounded `hours_back`/`hours_forward` and unclamped
+  `limit` server panics bounded/checked.
+- Migration V19: source idempotency key scoped by `source_project`; the V19
+  lookup matches NULL/'' bucketing (COALESCE both sides). Migration V20
+  clears connector cursors so the repair applies automatically on next sync.
+
+### Fixed — recurring intentions re-arm (upstream #124, partial take)
+
+- `mark_triggered` advances a recurring trigger's `next_occurrence` and
+  returns the intention to Active (was firing once, staying Triggered
+  forever). `Trigger::re_arm` recurses into Compound.
+
+### Changed — toolchain & dependencies
+
+- `rust-toolchain.toml` pins 1.97.1 (+ the `clippy::for_kv_map` fix it
+  requires). rustls-webpki 0.103.13, quinn-proto 0.11.16, crossbeam-epoch
+  0.9.20 clear upstream's five cargo-audit advisories.
+
 ## [2.2.8] - 2026-07-17 — "Spacing Effect"
 
 Two long-open retrieval bugs from the 2026-07-15 recall-freshness postmortem.

@@ -2111,7 +2111,7 @@ mod tests {
 
         // 'verse' appears twice out of five — frequent but NOT a majority, so
         // common_tags is empty and the label must come from the fallback.
-        let mut memories = vec![
+        let mut memories = [
             make_memory("1", "notes on the verse cosmology", vec!["verse"]),
             make_memory("2", "verse faction design", vec!["verse"]),
             make_memory("3", "shader pipeline fix", vec!["shaders"]),
