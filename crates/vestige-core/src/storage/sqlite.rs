@@ -1564,6 +1564,27 @@ impl SqliteMemoryStore {
         Ok(())
     }
 
+    /// Replace a node's tags in-place (v2.2.9 "Convergent Evolution").
+    ///
+    /// Touches ONLY `tags` + `updated_at`: FSRS state (stability, difficulty,
+    /// reps, lapses, strengths) and content are untouched, and the embedding is
+    /// NOT regenerated — embeddings are computed from content alone, so a retag
+    /// cannot stale them. The `knowledge_au` FTS trigger re-indexes the row, so
+    /// keyword search picks up the new tags immediately.
+    pub fn update_node_tags(&self, id: &str, tags: &[String]) -> Result<()> {
+        let tags_json = serde_json::to_string(tags)
+            .map_err(|e| StorageError::Init(format!("Failed to serialize tags: {}", e)))?;
+        let writer = self
+            .writer
+            .lock()
+            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        writer.execute(
+            "UPDATE knowledge_nodes SET tags = ?1, updated_at = ?2 WHERE id = ?3",
+            params![tags_json, Utc::now().to_rfc3339(), id],
+        )?;
+        Ok(())
+    }
+
     /// Generate embedding for a node
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
     fn generate_embedding_for_node(&self, node_id: &str, content: &str) -> Result<()> {
@@ -11786,6 +11807,54 @@ mod tests {
         let retrieved = storage.get_node(&node.id).unwrap();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().content, "Test memory content");
+    }
+
+    #[test]
+    fn test_update_node_tags_preserves_content_fsrs_and_syncs_fts() {
+        let storage = create_test_storage();
+
+        let input = IngestInput {
+            content: "Retag target memory".to_string(),
+            node_type: "fact".to_string(),
+            tags: vec!["staletag".to_string()],
+            ..Default::default()
+        };
+        let node = storage.ingest(input).unwrap();
+        let before = storage.get_node(&node.id).unwrap().unwrap();
+
+        storage
+            .update_node_tags(
+                &node.id,
+                &["canonicaltag".to_string(), "secondtag".to_string()],
+            )
+            .unwrap();
+
+        let after = storage.get_node(&node.id).unwrap().unwrap();
+        assert_eq!(
+            after.tags,
+            vec!["canonicaltag".to_string(), "secondtag".to_string()]
+        );
+        assert_eq!(after.content, before.content, "content must be untouched");
+        assert_eq!(after.stability, before.stability, "FSRS stability untouched");
+        assert_eq!(
+            after.difficulty, before.difficulty,
+            "FSRS difficulty untouched"
+        );
+        assert_eq!(after.reps, before.reps, "FSRS reps untouched");
+        assert_eq!(after.lapses, before.lapses, "FSRS lapses untouched");
+
+        // The knowledge_au FTS trigger must re-index the row: the new tag is
+        // keyword-searchable, the replaced one no longer matches.
+        let hits = storage.search("canonicaltag", 10).unwrap();
+        assert!(
+            hits.iter().any(|n| n.id == node.id),
+            "new tag must be FTS-searchable"
+        );
+        let old_hits = storage.search("staletag", 10).unwrap();
+        assert!(
+            !old_hits.iter().any(|n| n.id == node.id),
+            "replaced tag must be gone from FTS"
+        );
     }
 
     #[test]

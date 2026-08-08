@@ -44,7 +44,7 @@ pub fn schema() -> Value {
             "action": {
                 "type": "string",
                 "enum": ["get", "get_batch", "delete", "purge", "state", "promote", "demote", "edit", "supersede"],
-                "description": "Action to perform: 'get' retrieves full memory node, 'get_batch' retrieves multiple memories by IDs (use 'ids' array), 'purge' permanently removes memory content and embeddings after confirm=true, 'delete' is a backwards-compatible alias for purge and also requires confirm=true, 'state' returns accessibility state, 'promote' increases retrieval strength (thumbs up), 'demote' decreases retrieval strength (thumbs down), 'edit' updates content in-place (preserves FSRS state), 'supersede' marks memory 'id' as superseded by 'winnerId' (demotes + stamps valid_until/superseded_by, keeps it queryable for audit, reversible via dedup undo; refuses protected targets)"
+                "description": "Action to perform: 'get' retrieves full memory node, 'get_batch' retrieves multiple memories by IDs (use 'ids' array), 'purge' permanently removes memory content and embeddings after confirm=true, 'delete' is a backwards-compatible alias for purge and also requires confirm=true, 'state' returns accessibility state, 'promote' increases retrieval strength (thumbs up), 'demote' decreases retrieval strength (thumbs down), 'edit' updates content and/or tags in-place (preserves FSRS state), 'supersede' marks memory 'id' as superseded by 'winnerId' (demotes + stamps valid_until/superseded_by, keeps it queryable for audit, reversible via dedup undo; refuses protected targets)"
             },
             "id": {
                 "type": "string",
@@ -66,7 +66,12 @@ pub fn schema() -> Value {
             },
             "content": {
                 "type": "string",
-                "description": "New content for edit action. Replaces existing content, regenerates embedding, preserves FSRS state."
+                "description": "New content for edit action. Replaces existing content, regenerates embedding, preserves FSRS state. May be combined with 'tags'."
+            },
+            "tags": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "For edit action: replaces the memory's FULL tag array (v2.2.9). FSRS state, content, and embedding untouched; the FTS keyword index syncs automatically. Omit to leave tags unchanged; [] clears all tags. Tags are trimmed, empties dropped, exact duplicates removed. May be combined with 'content'."
             },
             "winnerId": {
                 "type": "string",
@@ -86,6 +91,7 @@ struct MemoryArgs {
     reason: Option<String>,
     confirm: Option<bool>,
     content: Option<String>,
+    tags: Option<Vec<String>>,
     winner_id: Option<String>,
 }
 
@@ -144,7 +150,7 @@ pub async fn execute(
         "state" => execute_state(storage, &id).await,
         "promote" => execute_promote(storage, cognitive, &id, args.reason).await,
         "demote" => execute_demote(storage, cognitive, &id, args.reason).await,
-        "edit" => execute_edit(storage, &id, args.content).await,
+        "edit" => execute_edit(storage, &id, args.content, args.tags).await,
         "supersede" => execute_supersede(storage, &id, args.winner_id).await,
         _ => Err(format!(
             "Invalid action '{}'. Must be one of: get, get_batch, delete, purge, state, promote, demote, edit, supersede",
@@ -492,51 +498,87 @@ async fn execute_demote(
     }))
 }
 
-/// Edit a memory's content in-place — preserves FSRS state, regenerates embedding
+/// Edit a memory's content and/or tags in-place — preserves FSRS state.
+/// Content edits regenerate the embedding; tag edits (v2.2.9 "Convergent
+/// Evolution") replace the full tag array without touching the embedding.
 async fn execute_edit(
     storage: &Arc<Storage>,
     id: &str,
     content: Option<String>,
+    tags: Option<Vec<String>>,
 ) -> Result<Value, String> {
-    let new_content = content.ok_or("Missing 'content' field. Required for edit action.")?;
+    if content.is_none() && tags.is_none() {
+        return Err(
+            "Edit action requires 'content' and/or 'tags'. Pass 'content' to rewrite the memory, 'tags' to replace its tag array ([] clears), or both.".to_string(),
+        );
+    }
 
-    if new_content.trim().is_empty() {
+    if let Some(ref c) = content
+        && c.trim().is_empty()
+    {
         return Err("Content cannot be empty".to_string());
     }
 
-    // Get existing node to capture old content
+    // Get existing node to capture old content/tags (and verify existence)
     let old_node = storage
         .get_node(id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Memory not found: {}", id))?;
 
-    // Update content (regenerates embedding, syncs FTS5)
-    storage
-        .update_node_content(id, &new_content)
-        .map_err(|e| e.to_string())?;
-
-    // Truncate previews for response (char-safe to avoid UTF-8 panics)
-    let old_preview = if old_node.content.chars().count() > 200 {
-        let truncated: String = old_node.content.chars().take(197).collect();
-        format!("{}...", truncated)
-    } else {
-        old_node.content.clone()
-    };
-    let new_preview = if new_content.chars().count() > 200 {
-        let truncated: String = new_content.chars().take(197).collect();
-        format!("{}...", truncated)
-    } else {
-        new_content.clone()
-    };
-
-    Ok(serde_json::json!({
+    let mut response = serde_json::json!({
         "success": true,
         "action": "edit",
         "nodeId": id,
-        "oldContentPreview": old_preview,
-        "newContentPreview": new_preview,
-        "note": "FSRS state preserved (stability, difficulty, reps, lapses unchanged). Embedding regenerated for new content."
-    }))
+    });
+    let mut notes: Vec<&str> =
+        vec!["FSRS state preserved (stability, difficulty, reps, lapses unchanged)."];
+
+    if let Some(new_content) = content {
+        // Update content (regenerates embedding, syncs FTS5)
+        storage
+            .update_node_content(id, &new_content)
+            .map_err(|e| e.to_string())?;
+
+        // Truncate previews for response (char-safe to avoid UTF-8 panics)
+        let old_preview = if old_node.content.chars().count() > 200 {
+            let truncated: String = old_node.content.chars().take(197).collect();
+            format!("{}...", truncated)
+        } else {
+            old_node.content.clone()
+        };
+        let new_preview = if new_content.chars().count() > 200 {
+            let truncated: String = new_content.chars().take(197).collect();
+            format!("{}...", truncated)
+        } else {
+            new_content.clone()
+        };
+        response["oldContentPreview"] = serde_json::json!(old_preview);
+        response["newContentPreview"] = serde_json::json!(new_preview);
+        notes.push("Embedding regenerated for new content.");
+    }
+
+    if let Some(raw_tags) = tags {
+        // Normalize: trim, drop empties, dedupe exact duplicates (order kept).
+        // No case-folding — tag casing conventions are the user's, not the engine's.
+        let mut new_tags: Vec<String> = Vec::with_capacity(raw_tags.len());
+        for t in raw_tags {
+            let trimmed = t.trim();
+            if !trimmed.is_empty() && !new_tags.iter().any(|existing| existing == trimmed) {
+                new_tags.push(trimmed.to_string());
+            }
+        }
+
+        storage
+            .update_node_tags(id, &new_tags)
+            .map_err(|e| e.to_string())?;
+
+        response["oldTags"] = serde_json::json!(old_node.tags);
+        response["newTags"] = serde_json::json!(new_tags);
+        notes.push("Tags replaced; embedding untouched (embeddings derive from content only), FTS keyword index synced.");
+    }
+
+    response["note"] = serde_json::json!(notes.join(" "));
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -1058,6 +1100,109 @@ mod tests {
         assert!(result.is_ok());
         let value = result.unwrap();
         assert_eq!(value["success"], true);
+    }
+
+    // === RETAG VIA EDIT (v2.2.9 "Convergent Evolution") ===
+
+    #[tokio::test]
+    async fn test_edit_tags_only_replaces_tags_preserves_content_and_fsrs() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+        let before = storage.get_node(&id).unwrap().unwrap();
+
+        let args = serde_json::json!({
+            "action": "edit",
+            "id": id,
+            "tags": ["rotn-clean-edition", "upstream-check"]
+        });
+        let value = execute(&storage, &test_cognitive(), Some(args))
+            .await
+            .unwrap();
+
+        assert_eq!(value["success"], true);
+        assert_eq!(value["oldTags"], serde_json::json!(["test-tag"]));
+        assert_eq!(
+            value["newTags"],
+            serde_json::json!(["rotn-clean-edition", "upstream-check"])
+        );
+        // A tags-only edit must not emit content previews
+        assert!(value.get("oldContentPreview").is_none());
+
+        let after = storage.get_node(&id).unwrap().unwrap();
+        assert_eq!(
+            after.tags,
+            vec!["rotn-clean-edition".to_string(), "upstream-check".to_string()]
+        );
+        assert_eq!(after.content, before.content, "content untouched");
+        assert_eq!(after.stability, before.stability);
+        assert_eq!(after.difficulty, before.difficulty);
+        assert_eq!(after.reps, before.reps);
+        assert_eq!(after.lapses, before.lapses);
+        assert_eq!(after.retention_strength, before.retention_strength);
+    }
+
+    #[tokio::test]
+    async fn test_edit_content_and_tags_together() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+
+        let args = serde_json::json!({
+            "action": "edit",
+            "id": id,
+            "content": "Rewritten content with fresh tags",
+            "tags": ["combined-edit"]
+        });
+        let value = execute(&storage, &test_cognitive(), Some(args))
+            .await
+            .unwrap();
+
+        assert_eq!(value["success"], true);
+        assert!(
+            value["newContentPreview"]
+                .as_str()
+                .unwrap()
+                .contains("Rewritten content")
+        );
+        assert_eq!(value["newTags"], serde_json::json!(["combined-edit"]));
+
+        let after = storage.get_node(&id).unwrap().unwrap();
+        assert_eq!(after.content, "Rewritten content with fresh tags");
+        assert_eq!(after.tags, vec!["combined-edit".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_edit_empty_tags_array_clears_tags() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+
+        let args = serde_json::json!({ "action": "edit", "id": id, "tags": [] });
+        let value = execute(&storage, &test_cognitive(), Some(args))
+            .await
+            .unwrap();
+
+        assert_eq!(value["newTags"], serde_json::json!([]));
+        let after = storage.get_node(&id).unwrap().unwrap();
+        assert!(after.tags.is_empty(), "explicit [] must clear all tags");
+    }
+
+    #[tokio::test]
+    async fn test_edit_tags_are_trimmed_deduped_and_empties_dropped() {
+        let (storage, _dir) = test_storage().await;
+        let id = ingest_memory(&storage).await;
+
+        let args = serde_json::json!({
+            "action": "edit",
+            "id": id,
+            "tags": ["  vestige  ", "vestige", "", "   ", "dev-backlog"]
+        });
+        let value = execute(&storage, &test_cognitive(), Some(args))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            value["newTags"],
+            serde_json::json!(["vestige", "dev-backlog"])
+        );
     }
 
     // === SUPERSEDE ACTION (v2.2.5 "Consent to Supersede") ===
