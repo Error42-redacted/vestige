@@ -388,7 +388,18 @@ impl PredictionErrorGate {
 
         // Check for near-identical match
         if let Some(best) = top_candidates.first() {
-            if best.similarity >= self.config.near_identical_threshold {
+            // A CORRECTION is lexically near-identical to what it corrects:
+            // "Never use fp16lib on Windows" vs "Always use fp16lib on Windows"
+            // sits around cosine 0.94, comfortably over near_identical_threshold.
+            // Reinforcing on similarity alone therefore discards the correction
+            // AND strengthens the very memory the user just said is wrong — the
+            // single worst outcome this gate can produce. `appears_contradictory`
+            // is already computed for this candidate above, so honour it here
+            // and let the correction/contradiction branches below decide.
+            // (Upstream v2.4.0.)
+            if best.similarity >= self.config.near_identical_threshold
+                && !best.appears_contradictory
+            {
                 // Nearly identical - reinforce existing
                 self.stats.updates += 1;
                 return GateDecision::Update {
@@ -751,6 +762,54 @@ mod tests {
             was_demoted: false,
             was_promoted: false,
         }
+    }
+
+    /// A correction is lexically near-identical to what it corrects. The
+    /// near-identical short-circuit must not read it as agreement and
+    /// reinforce the memory the user just said is wrong. (Upstream v2.4.0.)
+    #[test]
+    fn correction_is_not_swallowed_as_reinforcement() {
+        let embedding = make_embedding(1.0);
+        let stored = "Always use the fp16lib feature for usearch on Windows";
+
+        let mut gate = PredictionErrorGate::new();
+        let candidate = CandidateMemory {
+            content: stored.to_string(),
+            ..make_candidate("mem-1", 1.0)
+        };
+        let decision = gate.evaluate(
+            "Never use the fp16lib feature for usearch on Windows",
+            &embedding,
+            &[candidate],
+        );
+        assert!(
+            !matches!(
+                decision,
+                GateDecision::Update {
+                    update_type: UpdateType::Reinforce,
+                    ..
+                }
+            ),
+            "a contradicting near-duplicate must not be reinforced: {decision:?}"
+        );
+
+        // The same text without the polarity flip still reinforces.
+        let mut gate = PredictionErrorGate::new();
+        let candidate = CandidateMemory {
+            content: stored.to_string(),
+            ..make_candidate("mem-1", 1.0)
+        };
+        let decision = gate.evaluate(stored, &embedding, &[candidate]);
+        assert!(
+            matches!(
+                decision,
+                GateDecision::Update {
+                    update_type: UpdateType::Reinforce,
+                    ..
+                }
+            ),
+            "identical content is a reinforcement: {decision:?}"
+        );
     }
 
     #[test]

@@ -155,19 +155,70 @@ fn is_entity_stopword(tok: &str) -> bool {
     ENTITY_STOPWORDS.contains(&tok)
 }
 
+/// Does this token look like a real identifier — an env var, a path, a
+/// filename, a dotted symbol — as opposed to an ordinary word?
+///
+/// The backward reach joins a failure to its cause on SHARED ENTITIES. That
+/// only works if an "entity" is something specific. Anything that admits
+/// common vocabulary turns the causal join into "these two memories used the
+/// same word", which is precisely what vector search already does and what
+/// backfill exists to complement. (Upstream v2.4.0, on top of the local
+/// stopword filter.)
+fn is_identifier_shaped(tok: &str) -> bool {
+    if tok.len() < 3 {
+        return false;
+    }
+    let has_digit = tok.chars().any(|c| c.is_ascii_digit());
+    // UPPER_SNAKE env var, or an all-caps token carrying a digit (API_TIMEOUT,
+    // S3_BUCKET, PORT8080). A separator or digit is REQUIRED: a bare all-caps
+    // word is shouted prose far more often than an identifier — this store's
+    // own memories are written in a house style that shouts DONE / NEXT /
+    // DANGER / GREEN — and with a raw shared-entity count, three such junk
+    // matches outrank one genuine rare identifier. The old rule kept bare
+    // words of five letters or fewer as "acronyms" (ESP, SSE), which let every
+    // short emphasis word through; acronyms are not rare enough to be join
+    // keys and are dropped with the rest.
+    let is_env = tok
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+        && tok.chars().any(|c| c.is_ascii_uppercase())
+        && (tok.contains('_') || has_digit);
+
+    // Path or dotted/slashed identifier. Requires a segment on BOTH sides of
+    // the separator and at least one multi-character segment, so prose
+    // abbreviations ("e.g.", "i.e.", "U.S.") and bare version numbers no
+    // longer qualify as causal join keys.
+    let is_path = if tok.contains('/') || tok.contains('.') {
+        let segs: Vec<&str> = tok.split(['/', '.']).filter(|x| !x.is_empty()).collect();
+        segs.len() >= 2
+            && segs.iter().any(|x| x.len() >= 3)
+            && tok.chars().any(|c| c.is_ascii_alphabetic())
+    } else {
+        false
+    };
+
+    is_env || is_path
+}
+
 /// Pull shared-entity join keys from content + tags (single source of truth used
 /// by the MCP tool, CLI, and offline pass so they never diverge). Only real
-/// identifiers become join keys: UPPER_SNAKE/dotted-or-slashed tokens and short
-/// acronyms. Stopwords and ALL-CAPS emphasis prose are rejected so they cannot
-/// forge spurious causal links.
+/// identifiers become join keys: UPPER_SNAKE/dotted-or-slashed tokens.
+/// Stopwords, ALL-CAPS emphasis prose, and topical tags are rejected so they
+/// cannot forge spurious causal links.
 pub fn extract_entities(content: &str, tags: &[String]) -> Vec<String> {
     use std::collections::HashSet;
-    // Tags are curated join keys — but drop stopword tags (auto-tagging can emit
-    // "not"/"only") so they never link unrelated memories.
+    // Tags are NOT trusted verbatim (upstream v2.4.0). Ingest guidance
+    // encourages a topical tag on every save, so tags are overwhelmingly broad
+    // vocabulary ("vestige" sits on most of this store's memories; "bug",
+    // "verified", "modding"). Inserting them raw made every memory sharing a
+    // topic a "causal" match. Run them through the same shape test as content
+    // tokens — on the tag AS WRITTEN, because shape-testing the lowercased
+    // form would reject every uppercase env var — then lowercase for storage.
     let mut set: HashSet<String> = tags
         .iter()
+        .map(|t| t.trim())
+        .filter(|t| !is_entity_stopword(&t.to_lowercase()) && is_identifier_shaped(t))
         .map(|t| t.to_lowercase())
-        .filter(|t| t.len() >= 2 && !is_entity_stopword(t))
         .collect();
     for raw in content.split(|c: char| {
         !(c.is_alphanumeric() || c == '_' || c == '.' || c == '/' || c == '-')
@@ -182,21 +233,7 @@ pub fn extract_entities(content: &str, tags: &[String]) -> Vec<String> {
         if is_entity_stopword(&lower) {
             continue;
         }
-        let alpha = tok.chars().filter(|c| c.is_ascii_alphabetic()).count();
-        let has_digit = tok.chars().any(|c| c.is_ascii_digit());
-        // A genuine env var is UPPER_SNAKE or carries a digit (API_TIMEOUT,
-        // S3_BUCKET, PORT8080). A *bare* all-caps word is either a short acronym
-        // (ESP, SSE, FNV — keep) or shouted prose (MIGRATION, INSIGHT — drop):
-        // require a separator/digit once the token is longer than an acronym.
-        let is_env = tok.len() >= 3
-            && tok
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
-            && tok.chars().any(|c| c.is_ascii_uppercase())
-            && (tok.contains('_') || has_digit || alpha <= 5);
-        let is_path = (tok.contains('/') || tok.contains('.'))
-            && tok.chars().any(|c| c.is_ascii_alphabetic());
-        if is_env || is_path {
+        if is_identifier_shaped(tok) {
             set.insert(lower);
         }
     }
@@ -688,23 +725,72 @@ mod tests {
             );
         }
         assert!(ents.contains(&"api_timeout".to_string()), "env var kept: {ents:?}");
-        assert!(ents.contains(&"esp".to_string()), "short acronym kept: {ents:?}");
+        // A bare all-caps word — acronym or emphasis, the extractor cannot tell —
+        // is not rare enough to be a causal join key (v2.2.10).
+        assert!(!ents.contains(&"esp".to_string()), "bare acronym dropped: {ents:?}");
         assert!(
             ents.contains(&"config/mods.ini".to_string()),
             "path kept: {ents:?}"
         );
-        assert!(ents.contains(&"modding".to_string()), "clean tag kept: {ents:?}");
+        // Topical tags are vocabulary, not identifiers (v2.2.10).
+        assert!(!ents.contains(&"modding".to_string()), "topical tag dropped: {ents:?}");
     }
 
-    /// Stopword TAGS (auto-tagging can emit them) are dropped too.
+    /// Realistic prose in this store's own house style: shouted emphasis,
+    /// topical tags, prose abbreviations. Only identifiers survive, including
+    /// a tag-only env var (proves tags are shape-tested before lowercasing).
+    #[test]
+    fn extract_entities_keeps_identifiers_and_rejects_prose() {
+        let content = "VESTIGE BUG VERIFIED: this is a DANGEROUS FALSE NEGATIVE. \
+                       Set RUST_LOG and VESTIGE_DATA_DIR before running, e.g. the \
+                       store at com.vestige.core/backups, see sqlite.rs for detail; \
+                       DONE, NEXT: v2.2.9 -> GREEN.";
+        let tags = vec![
+            "vestige".to_string(),
+            "bug".to_string(),
+            "verified".to_string(),
+            "PAYMENTS_REDIS_URL".to_string(),
+        ];
+        let ents = extract_entities(content, &tags);
+
+        for want in [
+            "rust_log",
+            "vestige_data_dir",
+            "payments_redis_url",
+            "com.vestige.core/backups",
+            "sqlite.rs",
+        ] {
+            assert!(ents.iter().any(|e| e == want), "missing entity {want:?}: {ents:?}");
+        }
+        for junk in [
+            "verified", "bug", "false", "dangerous", "negative", "vestige", "e.g", "done",
+            "next", "green", "v2.2.9",
+        ] {
+            assert!(
+                !ents.iter().any(|e| e == junk),
+                "vocabulary {junk:?} must not be an entity: {ents:?}"
+            );
+        }
+    }
+
+    /// Stopword TAGS (auto-tagging can emit them) are dropped, and so is any
+    /// tag that is not identifier-shaped; an identifier-shaped tag survives.
     #[test]
     fn stopword_tags_are_dropped() {
         let ents = extract_entities(
             "plain content here",
-            &["not".into(), "only".into(), "auth-service".into()],
+            &[
+                "not".into(),
+                "only".into(),
+                "auth-service".into(),
+                "AUTH_SERVICE_URL".into(),
+                "services/auth.toml".into(),
+            ],
         );
         assert!(!ents.contains(&"not".to_string()));
         assert!(!ents.contains(&"only".to_string()));
-        assert!(ents.contains(&"auth-service".to_string()));
+        assert!(!ents.contains(&"auth-service".to_string()), "topical tag: {ents:?}");
+        assert!(ents.contains(&"auth_service_url".to_string()), "{ents:?}");
+        assert!(ents.contains(&"services/auth.toml".to_string()), "{ents:?}");
     }
 }
