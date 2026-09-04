@@ -14,7 +14,7 @@
 //!   Pre-ingest: importance scoring (4-channel) + intent detection → auto-tag
 //!   Post-ingest: synaptic tagging + novelty model update + hippocampal indexing
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
@@ -24,6 +24,34 @@ use crate::cognitive::CognitiveEngine;
 use vestige_core::{
     ContentType, ImportanceContext, ImportanceEvent, ImportanceEventType, IngestInput, Storage,
 };
+
+/// Default lifetime of a `state` memory. Overridable with
+/// `VESTIGE_STATE_TTL_DAYS`; `0` disables the default.
+const DEFAULT_STATE_TTL_DAYS: i64 = 30;
+
+fn state_ttl_days() -> i64 {
+    std::env::var("VESTIGE_STATE_TTL_DAYS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .filter(|days| *days >= 0)
+        .unwrap_or(DEFAULT_STATE_TTL_DAYS)
+}
+
+/// "Current state" memories (version numbers, deploy-pending notes, progress
+/// percentages, inventories) are the rot class that pollutes recall worst:
+/// they stay true in the store long after they stopped being true in the
+/// world. A `state` node therefore expires by default instead of by
+/// discipline. Every other node type is untouched. (Upstream v2.6.1.)
+fn state_valid_until_for(node_type: &str, now: DateTime<Utc>, ttl_days: i64) -> Option<DateTime<Utc>> {
+    if !node_type.eq_ignore_ascii_case("state") || ttl_days == 0 {
+        return None;
+    }
+    Some(now + chrono::Duration::days(ttl_days))
+}
+
+fn state_default_valid_until(node_type: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    state_valid_until_for(node_type, now, state_ttl_days())
+}
 
 /// Input schema for smart_ingest tool
 ///
@@ -40,7 +68,7 @@ pub fn schema() -> Value {
             },
             "node_type": {
                 "type": "string",
-                "description": "Type of knowledge: fact, concept, event, person, place, note, pattern, decision",
+                "description": "Type of knowledge: fact, concept, event, person, place, note, pattern, decision, state. 'state' is for current-state snapshots (version numbers, deploy status, progress, inventories) that rot: it expires VESTIGE_STATE_TTL_DAYS (default 30) after ingest; expired memories are down-ranked to the bottom of recall and marked currentlyValid=false (still retrievable for audit).",
                 "default": "fact"
             },
             "tags": {
@@ -85,7 +113,7 @@ pub fn schema() -> Value {
                         },
                         "node_type": {
                             "type": "string",
-                            "description": "Type: fact, concept, event, person, place, note, pattern, decision",
+                            "description": "Type: fact, concept, event, person, place, note, pattern, decision, state ('state' expires after VESTIGE_STATE_TTL_DAYS, default 30)",
                             "default": "fact"
                         },
                         "source": {
@@ -212,16 +240,19 @@ pub async fn execute(
         let _content_type = ContentType::detect(&content);
     }
 
+    let node_type = args.node_type.unwrap_or_else(|| "fact".to_string());
+    // v2.2.10: `state` memories expire by default (VESTIGE_STATE_TTL_DAYS).
+    let state_valid_until = state_default_valid_until(&node_type, Utc::now());
     let input = IngestInput {
         content: content.clone(),
-        node_type: args.node_type.unwrap_or_else(|| "fact".to_string()),
+        node_type,
         source: args.source,
         sentiment_score: 0.0,
         // Store importance composite as sentiment_magnitude for FSRS encoding boost
         sentiment_magnitude: importance_composite,
         tags,
         valid_from: None,
-        valid_until: None,
+        valid_until: state_valid_until,
         source_envelope: None,
     };
 
@@ -378,6 +409,14 @@ fn build_single_response(
         "reason": result.reason,
         "explanation": explanation
     });
+    // v2.2.10: surface the validity window the node was created with, so a
+    // `state` ingest can see its default expiry without a follow-up get.
+    if let Some(until) = result.node.valid_until {
+        response["validUntil"] = serde_json::json!(until.to_rfc3339());
+        if result.node.node_type.eq_ignore_ascii_case("state") {
+            response["validitySource"] = serde_json::json!("state_default_ttl");
+        }
+    }
     if let Some(sc) = &result.supersede_candidate
         && let Ok(v) = serde_json::to_value(sc)
     {
@@ -473,15 +512,18 @@ async fn execute_batch(
             let _content_type = ContentType::detect(&item.content);
         }
 
+        let node_type = item.node_type.unwrap_or_else(|| "fact".to_string());
+        // v2.2.10: `state` memories expire by default (VESTIGE_STATE_TTL_DAYS).
+        let state_valid_until = state_default_valid_until(&node_type, Utc::now());
         let input = IngestInput {
             content: item.content.clone(),
-            node_type: item.node_type.unwrap_or_else(|| "fact".to_string()),
+            node_type,
             source: item.source,
             sentiment_score: 0.0,
             sentiment_magnitude: importance_composite,
             tags,
             valid_from: None,
-            valid_until: None,
+            valid_until: state_valid_until,
             source_envelope: None,
         };
 
@@ -695,6 +737,64 @@ mod tests {
     use super::*;
     use crate::cognitive::CognitiveEngine;
     use tempfile::TempDir;
+
+    #[test]
+    fn state_nodes_expire_by_default_and_only_state_nodes() {
+        let now = Utc::now();
+        assert_eq!(
+            state_valid_until_for("state", now, DEFAULT_STATE_TTL_DAYS),
+            Some(now + chrono::Duration::days(DEFAULT_STATE_TTL_DAYS))
+        );
+        // Case-insensitive on the type.
+        assert!(state_valid_until_for("State", now, 30).is_some());
+        // A TTL of 0 disables the default.
+        assert_eq!(state_valid_until_for("state", now, 0), None);
+        // Every other node type is untouched.
+        for kind in ["fact", "decision", "event", "note", ""] {
+            assert_eq!(state_valid_until_for(kind, now, 30), None, "{kind:?}");
+        }
+    }
+
+    /// End to end: a `state` ingest lands with validUntil set and reports it;
+    /// a `fact` ingest does not.
+    #[tokio::test]
+    async fn state_ingest_persists_a_default_valid_until() {
+        let dir = TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(Some(dir.path().join("state.db"))).unwrap());
+        let cognitive = Arc::new(Mutex::new(CognitiveEngine::new()));
+
+        let state = execute(
+            &storage,
+            &cognitive,
+            Some(serde_json::json!({
+                "content": "Deploy of v2.2.10 is pending; binaries staged, clients not restarted",
+                "node_type": "state",
+                "forceCreate": true
+            })),
+        )
+        .await
+        .unwrap();
+        let id = state["nodeId"].as_str().expect("nodeId").to_string();
+        let node = storage.get_node(&id).unwrap().expect("state node exists");
+        let until = node.valid_until.expect("state node carries a validUntil");
+        let expected = Utc::now() + chrono::Duration::days(DEFAULT_STATE_TTL_DAYS);
+        assert!((until - expected).num_minutes().abs() < 5, "{until} vs {expected}");
+        assert!(node.is_currently_valid());
+
+        let fact = execute(
+            &storage,
+            &cognitive,
+            Some(serde_json::json!({
+                "content": "The pinned toolchain is 1.97.1",
+                "node_type": "fact",
+                "forceCreate": true
+            })),
+        )
+        .await
+        .unwrap();
+        let id = fact["nodeId"].as_str().expect("nodeId").to_string();
+        assert!(storage.get_node(&id).unwrap().unwrap().valid_until.is_none());
+    }
 
     fn test_cognitive() -> Arc<Mutex<CognitiveEngine>> {
         Arc::new(Mutex::new(CognitiveEngine::new()))

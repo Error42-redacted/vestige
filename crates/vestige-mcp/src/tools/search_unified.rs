@@ -754,6 +754,12 @@ pub async fn execute(
     // utility_score = times_useful / times_retrieved (0.0 to 1.0)
     // ====================================================================
     for result in &mut filtered_results {
+        // v2.2.10: an expired or not-yet-valid memory (a `state` node past its
+        // TTL, a consent-superseded loser, a tombstoned connector record)
+        // stays retrievable for audit but must not outrank a current fact on
+        // relevance alone. Applied last so no later boost can undo it.
+        result.combined_score *= default_validity_multiplier(&result.node);
+
         let utility = result.node.utility_score.unwrap_or(0.0) as f32;
         if utility > 0.0 {
             // Utility boost: up to +15% for memories with utility_score = 1.0
@@ -1084,6 +1090,14 @@ impl SourceFilter {
     }
 }
 
+/// Score multiplier for validity: 1.0 while a node is currently valid, 0.1
+/// once it has expired (or before it starts). Historical and future facts
+/// remain available for audit, but should not outrank a current one on
+/// relevance alone. (Upstream v2.6.1 semantics; the same x0.1 upstream applies.)
+fn default_validity_multiplier(node: &vestige_core::KnowledgeNode) -> f32 {
+    if node.is_currently_valid() { 1.0 } else { 0.1 }
+}
+
 /// Predicate: does this node satisfy the source-aware investigation filter?
 /// An all-empty filter returns `true` for every node.
 fn node_matches_source(node: &vestige_core::KnowledgeNode, filter: &SourceFilter) -> bool {
@@ -1249,6 +1263,7 @@ fn format_search_result(r: &vestige_core::SearchResult, detail_level: &str) -> V
                 "lapses": r.node.lapses,
                 "validFrom": r.node.valid_from.map(|dt| dt.to_rfc3339()),
                 "validUntil": r.node.valid_until.map(|dt| dt.to_rfc3339()),
+                "currentlyValid": r.node.is_currently_valid(),
                 "matchType": format!("{:?}", r.match_type),
             });
             attach_source_record(&mut v, &r.node);
@@ -1265,6 +1280,7 @@ fn format_search_result(r: &vestige_core::SearchResult, detail_level: &str) -> V
                 "nodeType": r.node.node_type,
                 "tags": r.node.tags,
                 "retentionStrength": r.node.retention_strength,
+                "currentlyValid": r.node.is_currently_valid(),
                 "createdAt": r.node.created_at.to_rfc3339(),
                 "updatedAt": r.node.updated_at.to_rfc3339(),
             });
@@ -1318,6 +1334,7 @@ pub fn format_node(node: &vestige_core::KnowledgeNode, detail_level: &str) -> Va
                 "lapses": node.lapses,
                 "validFrom": node.valid_from.map(|dt| dt.to_rfc3339()),
                 "validUntil": node.valid_until.map(|dt| dt.to_rfc3339()),
+                "currentlyValid": node.is_currently_valid(),
             });
             attach_source_record(&mut v, node);
             v
@@ -2281,6 +2298,23 @@ mod tests {
             &n,
             &filter_from(serde_json::json!({"sourceUpdatedBefore": "2026-06-15T00:00:00Z"}))
         ));
+    }
+
+    /// An expired memory is down-ranked, not hidden: x0.1, never zero.
+    #[test]
+    fn expired_memories_are_down_ranked_not_hidden() {
+        let mut node = vestige_core::KnowledgeNode::default();
+        assert_eq!(default_validity_multiplier(&node), 1.0);
+
+        node.valid_until = Some(chrono::Utc::now() - chrono::Duration::days(1));
+        assert_eq!(default_validity_multiplier(&node), 0.1);
+
+        node.valid_until = Some(chrono::Utc::now() + chrono::Duration::days(30));
+        assert_eq!(default_validity_multiplier(&node), 1.0, "a live state node is not penalized");
+
+        node.valid_until = None;
+        node.valid_from = Some(chrono::Utc::now() + chrono::Duration::days(1));
+        assert_eq!(default_validity_multiplier(&node), 0.1, "not yet valid");
     }
 
     #[test]
