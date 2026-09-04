@@ -1777,6 +1777,11 @@ fn run_consolidate() -> anyhow::Result<()> {
     println!("{}: {}", "Nodes Pruned".white().bold(), result.nodes_pruned);
     println!(
         "{}: {}",
+        "Duplicates Merged".white().bold(),
+        result.duplicates_merged
+    );
+    println!(
+        "{}: {}",
         "Decay Applied".white().bold(),
         result.decay_applied
     );

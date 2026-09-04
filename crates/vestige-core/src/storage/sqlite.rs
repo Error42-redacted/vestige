@@ -4151,13 +4151,22 @@ impl SqliteMemoryStore {
             .reader
             .lock()
             .map_err(|_| StorageError::Init("Reader lock poisoned".into()))?;
-        reader
+        let stored: f64 = reader
             .query_row(
                 "SELECT value FROM fsrs_config WHERE key = 'w20'",
                 [],
                 |row| row.get(0),
             )
-            .map_err(|e| StorageError::Init(format!("Failed to read w20: {}", e)))
+            .map_err(|e| StorageError::Init(format!("Failed to read w20: {}", e)))?;
+        // A stored value below the decay floor is a degenerate fit from an
+        // older build (see fsrs::optimizer::MIN_DECAY_BOUND), not a
+        // personalization: read it as the default until consolidation has
+        // repaired the row, so no caller ever computes with a dead curve.
+        if stored < crate::fsrs::MIN_DECAY_BOUND {
+            Ok(DEFAULT_DECAY)
+        } else {
+            Ok(stored)
+        }
     }
 
     /// Run full FSRS-6 consolidation cycle (v1.4.0)
@@ -4176,6 +4185,51 @@ impl SqliteMemoryStore {
 
         // v1.5.0: Use SleepConsolidation for structured consolidation
         let sleep = crate::SleepConsolidation::new();
+
+        // v2.2.10: repair state an older build left behind — idempotently,
+        // and BEFORE decay runs on it.
+        //
+        // (a) Stability values that escaped the MAX_STABILITY invariant before
+        //     the sentiment-boost clamp existed (upstream #121: real outliers
+        //     up to 1.4e24 days). No-op on healthy stores.
+        // (b) A persisted w20 below MIN_DECAY_BOUND is a degenerate fit from
+        //     the old 0.01-floored optimizer (measured on this store: 0.0104,
+        //     decay effectively dead), not a personalization. Restore the
+        //     FSRS-6 default so decay is alive on this very cycle; step 7
+        //     (optimize_w20) only overwrites it again when the access log
+        //     carries real forgetting evidence.
+        {
+            let writer = self
+                .writer
+                .lock()
+                .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+            let repaired = writer.execute(
+                "UPDATE knowledge_nodes SET stability = ?1 WHERE stability > ?1",
+                params![MAX_STABILITY],
+            )?;
+            if repaired > 0 {
+                tracing::warn!(
+                    repaired,
+                    "clamped runaway stability values back to MAX_STABILITY"
+                );
+            }
+            let restored = writer.execute(
+                "UPDATE fsrs_config SET value = ?1, updated_at = ?2
+                 WHERE key = 'w20' AND value < ?3",
+                params![
+                    DEFAULT_DECAY,
+                    Utc::now().to_rfc3339(),
+                    crate::fsrs::MIN_DECAY_BOUND
+                ],
+            )?;
+            if restored > 0 {
+                tracing::warn!(
+                    floor = crate::fsrs::MIN_DECAY_BOUND,
+                    restored_to = DEFAULT_DECAY,
+                    "stored w20 was below the decay floor (degenerate fit from an older build); restored the FSRS-6 default"
+                );
+            }
+        }
 
         // 1. Apply FSRS-6 decay with real formula + personalized w20
         let decay_applied = self.apply_decay()? as i64;
@@ -4536,34 +4590,38 @@ impl SqliteMemoryStore {
         let auto_promoted = self.auto_promote_frequent_access().unwrap_or(0);
         promoted += auto_promoted;
 
-        // 19. Retention Target System — auto-GC if avg retention below target
-        let mut gc_triggered = false;
+        // 19. Retention Target System — REPORT ONLY. Consolidation never
+        // deletes memories.
+        //
+        // Until v2.2.10 this step hard-deleted every memory below 0.3
+        // retention older than 30 days whenever average retention slipped
+        // under VESTIGE_RETENTION_TARGET (default 0.8). It looked dormant
+        // only because decay was broken (the w20 story in fsrs/optimizer.rs):
+        // on 2026-09-03 this store measured avg retention 0.650 — the trigger
+        // was already armed — with nothing yet below 0.3. Upstream lost 23
+        // real memories the day their decay came back to life with this
+        // collector still in place (v2.6.0). Forgetting in Vestige means
+        // DOWN-RANKING (the accessibility states); destruction is reserved
+        // for the explicit, previewable, dry-run-by-default
+        // `maintain {action:"gc"}` and `purge` paths. VESTIGE_RETENTION_TARGET
+        // no longer gates anything destructive (health still reports it).
         {
-            let retention_target: f64 = std::env::var("VESTIGE_RETENTION_TARGET")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0.8);
-
             let avg_retention = self.get_avg_retention().unwrap_or(1.0);
             let total = self.get_stats().map(|s| s.total_nodes).unwrap_or(0);
             let below_target = self.count_memories_below_retention(0.3).unwrap_or(0);
 
-            if avg_retention < retention_target && below_target > 0 {
-                let gc_count = self.gc_below_retention(0.3, 30).unwrap_or(0);
-                if gc_count > 0 {
-                    gc_triggered = true;
-                    tracing::info!(
-                        avg_retention = avg_retention,
-                        target = retention_target,
-                        gc_count = gc_count,
-                        "Retention target auto-GC: removed {} low-retention memories",
-                        gc_count
-                    );
-                }
+            if below_target > 0 {
+                tracing::info!(
+                    avg_retention,
+                    gc_candidates = below_target,
+                    "{} memories sit below 0.3 retention; review them with maintain {{action:\"gc\", dry_run:true}} — consolidation deletes nothing",
+                    below_target
+                );
             }
 
-            // 20. Save retention snapshot for trend tracking
-            let _ = self.save_retention_snapshot(avg_retention, total, below_target, gc_triggered);
+            // 20. Save retention snapshot for trend tracking. `gc_triggered`
+            // is permanently false: the autonomic GC no longer exists.
+            let _ = self.save_retention_snapshot(avg_retention, total, below_target, false);
         }
 
         let duration = start.elapsed().as_millis() as i64;
@@ -5161,10 +5219,20 @@ impl SqliteMemoryStore {
 
         let logs: Vec<(String, String, String)> = reader
             .prepare(
-                "SELECT mal.node_id, mal.access_type, mal.accessed_at
-                 FROM memory_access_log mal
-                 ORDER BY mal.accessed_at ASC
-                 LIMIT 1000",
+                // Explicit feedback only: a search hit is the memory being
+                // SHOWN, not a recall outcome, and it is the overwhelming
+                // majority of the log — training on it teaches the curve that
+                // nothing is ever forgotten. And the most RECENT window, not
+                // the oldest: `ASC LIMIT 1000` trained forever on the
+                // earliest era of the log, and the 90-day pruning slid that
+                // window under the optimizer's feet.
+                "SELECT node_id, access_type, accessed_at FROM (
+                     SELECT mal.node_id, mal.access_type, mal.accessed_at
+                     FROM memory_access_log mal
+                     WHERE mal.access_type NOT IN ('search_hit', 'retrieval_shown')
+                     ORDER BY mal.accessed_at DESC
+                     LIMIT 1000
+                 ) ORDER BY accessed_at ASC",
             )?
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .filter_map(|r| r.ok())
@@ -5192,7 +5260,11 @@ impl SqliteMemoryStore {
                 let rating = match access_type.as_str() {
                     "promote" => 4,
                     "search_hit" => 3,
-                    "demote" => 1,
+                    // Suppression is the strongest forgetting signal a user
+                    // can send; the old catch-all scored it as a SUCCESSFUL
+                    // recall. A reversed suppression is a correction of that
+                    // signal, not a recall outcome either way: neutral.
+                    "demote" | "suppress" => 1,
                     _ => 3,
                 };
 
@@ -8482,11 +8554,20 @@ impl SqliteMemoryStore {
         Ok(count)
     }
 
-    /// Auto-GC memories below threshold (used by retention target system)
+    /// Explicit garbage collection of decayed memories — the ONLY collector
+    /// since v2.2.10 (the autonomic retention-target GC in consolidation is
+    /// gone). Reached through `maintain {action:"gc"}`, which previews by
+    /// default.
+    ///
+    /// Protected (pinned) memories are never collected, however decayed: a
+    /// pin says "keep this"; low retention only says "rarely retrieved".
+    /// Every deletion goes through `purge_node`, so the memory leaves a
+    /// content-free deletion tombstone (`memory` get reports it as purged,
+    /// not "never existed"), a sync tombstone, and no vector-index residue.
     pub fn gc_below_retention(&self, threshold: f64, min_age_days: i64) -> Result<i64> {
         let cutoff = (Utc::now() - Duration::days(min_age_days)).to_rfc3339();
+        let protected = self.protected_node_ids()?;
 
-        // Collect IDs first for sync tombstones and vector index cleanup.
         let doomed_ids: Vec<String> = {
             let reader = self
                 .reader
@@ -8497,33 +8578,22 @@ impl SqliteMemoryStore {
             )?;
             stmt.query_map(params![threshold, cutoff], |row| row.get(0))?
                 .filter_map(|r| r.ok())
+                .filter(|id: &String| !protected.contains(id))
                 .collect()
         };
 
-        let writer = self
-            .writer
-            .lock()
-            .map_err(|_| StorageError::Init("Writer lock poisoned".into()))?;
+        let reason = format!(
+            "gc_below_retention: retention < {threshold} and older than {min_age_days} days"
+        );
+        let mut deleted = 0_i64;
         for id in &doomed_ids {
-            Self::record_sync_tombstone(&writer, "knowledge_nodes", id, "gc_below_retention")?;
-        }
-        let deleted = writer.execute(
-            "DELETE FROM knowledge_nodes WHERE retention_strength < ?1 AND created_at < ?2",
-            params![threshold, cutoff],
-        )? as i64;
-        drop(writer);
-
-        // Clean up vector index
-        #[cfg(all(feature = "embeddings", feature = "vector-search"))]
-        if deleted > 0
-            && let Some(index) = self.vector_index.as_ref()
-            && let Ok(mut index) = index.lock()
-        {
-            for id in &doomed_ids {
-                let _ = index.remove(id);
+            if self.purge_node(id, Some(&reason))?.deleted {
+                deleted += 1;
             }
         }
-
+        if deleted > 0 {
+            tracing::info!(deleted, threshold, min_age_days, "explicit GC purged decayed memories");
+        }
         Ok(deleted)
     }
 
@@ -15627,6 +15697,223 @@ mod tests {
             assert!(storage.get_node(ghost).unwrap().is_none());
             assert!(storage.get_deletion_tombstone(ghost).unwrap().is_none());
         });
+    }
+
+    // ============== Nothing deletes your memories except you (v2.2.10) ==========
+
+    fn age_and_decay(storage: &Storage, id: &str, retention: f64, days_old: i64) {
+        let writer = storage.writer.lock().unwrap();
+        let old = (Utc::now() - Duration::days(days_old)).to_rfc3339();
+        writer
+            .execute(
+                "UPDATE knowledge_nodes
+                 SET retention_strength = ?1, created_at = ?2, last_accessed = ?2
+                 WHERE id = ?3",
+                params![retention, old, id],
+            )
+            .unwrap();
+    }
+
+    fn live_node_count(storage: &Storage) -> i64 {
+        let reader = storage.reader.lock().unwrap();
+        reader
+            .query_row("SELECT COUNT(*) FROM knowledge_nodes", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// REGRESSION (v2.2.10 data-safety): consolidation must never delete a
+    /// memory. Until this release an autonomic "retention target" GC inside
+    /// run_consolidation hard-deleted everything below 0.3 retention older
+    /// than 30 days — dormant only while decay was broken. This constructs
+    /// exactly the doomed profile and asserts nothing dies.
+    #[test]
+    fn consolidation_never_deletes_low_retention_memories() {
+        let storage = create_test_storage();
+        let mut ids = Vec::new();
+        for i in 0..4 {
+            let node = storage
+                .ingest(IngestInput {
+                    content: format!("Old low-retention memory number {i} that must survive"),
+                    node_type: "fact".to_string(),
+                    ..Default::default()
+                })
+                .unwrap();
+            ids.push(node.id);
+        }
+        for id in &ids {
+            age_and_decay(&storage, id, 0.05, 120);
+        }
+        let before = live_node_count(&storage);
+
+        storage.run_consolidation().unwrap();
+
+        assert_eq!(before, live_node_count(&storage), "consolidation deleted memories");
+        for id in &ids {
+            assert!(
+                storage.get_node(id).unwrap().is_some(),
+                "low-retention memory {id} was reaped by consolidation"
+            );
+            assert!(storage.get_deletion_tombstone(id).unwrap().is_none());
+        }
+    }
+
+    /// The explicit GC path spares protected (pinned) memories no matter how
+    /// decayed, and tombstones what it does collect via the purge path.
+    #[test]
+    fn gc_spares_protected_memories_and_tombstones_the_rest() {
+        let storage = create_test_storage();
+        let pinned = storage
+            .ingest(IngestInput {
+                content: "Pinned but heavily decayed memory".to_string(),
+                node_type: "fact".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        let doomed = storage
+            .ingest(IngestInput {
+                content: "Unpinned decayed memory".to_string(),
+                node_type: "fact".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        let fresh = storage
+            .ingest(IngestInput {
+                content: "Recent memory with low retention".to_string(),
+                node_type: "fact".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        age_and_decay(&storage, &pinned.id, 0.05, 120);
+        age_and_decay(&storage, &doomed.id, 0.05, 120);
+        age_and_decay(&storage, &fresh.id, 0.05, 3); // too young for the 30-day gate
+        storage.set_protected(&pinned.id, true).unwrap();
+
+        let deleted = storage.gc_below_retention(0.3, 30).unwrap();
+        assert_eq!(deleted, 1, "only the unpinned, old memory is collected");
+        assert!(storage.get_node(&pinned.id).unwrap().is_some(), "pin survives GC");
+        assert!(storage.get_node(&fresh.id).unwrap().is_some(), "young memory survives GC");
+        assert!(storage.get_node(&doomed.id).unwrap().is_none());
+        let tombstone = storage
+            .get_deletion_tombstone(&doomed.id)
+            .unwrap()
+            .expect("GC leaves a content-free deletion tombstone");
+        assert!(
+            tombstone.reason.as_deref().unwrap_or("").contains("gc_below_retention"),
+            "tombstone names the collector: {:?}",
+            tombstone.reason
+        );
+
+        // Idempotent: a second pass finds nothing.
+        assert_eq!(storage.gc_below_retention(0.3, 30).unwrap(), 0);
+    }
+
+    /// A stored w20 below the decay floor (the degenerate fit older builds
+    /// persisted) is read as the default immediately and repaired on disk by
+    /// the next consolidation.
+    #[test]
+    fn subfloor_stored_w20_is_read_as_default_and_repaired_by_consolidation() {
+        let storage = create_test_storage();
+        {
+            let writer = storage.writer.lock().unwrap();
+            writer
+                .execute(
+                    "INSERT OR REPLACE INTO fsrs_config (key, value, updated_at)
+                     VALUES ('w20', 0.0104, ?1)",
+                    params![Utc::now().to_rfc3339()],
+                )
+                .unwrap();
+        }
+        assert_eq!(storage.get_fsrs_w20().unwrap(), DEFAULT_DECAY, "floored on read");
+
+        storage.run_consolidation().unwrap();
+
+        let on_disk: f64 = {
+            let reader = storage.reader.lock().unwrap();
+            reader
+                .query_row("SELECT value FROM fsrs_config WHERE key = 'w20'", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(on_disk, DEFAULT_DECAY, "consolidation restored the default on disk");
+
+        // A legitimate personalization above the floor is left alone.
+        {
+            let writer = storage.writer.lock().unwrap();
+            writer
+                .execute("UPDATE fsrs_config SET value = 0.12 WHERE key = 'w20'", [])
+                .unwrap();
+        }
+        assert!((storage.get_fsrs_w20().unwrap() - 0.12).abs() < 1e-9);
+    }
+
+    /// Runaway stability values (unclamped sentiment-boost compounding in
+    /// older builds) are clamped back to MAX_STABILITY by consolidation.
+    #[test]
+    fn consolidation_clamps_runaway_stability() {
+        let storage = create_test_storage();
+        let node = storage
+            .ingest(IngestInput {
+                content: "Memory whose stability ran away".to_string(),
+                node_type: "fact".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        {
+            let writer = storage.writer.lock().unwrap();
+            writer
+                .execute(
+                    "UPDATE knowledge_nodes SET stability = 1.4e24 WHERE id = ?1",
+                    params![node.id],
+                )
+                .unwrap();
+        }
+        storage.run_consolidation().unwrap();
+        let stability = storage.get_node(&node.id).unwrap().unwrap().stability;
+        assert!(
+            stability <= MAX_STABILITY,
+            "stability {stability} still above MAX_STABILITY"
+        );
+    }
+
+    /// The w20 optimizer trains on explicit feedback only: a log made of
+    /// search hits is not evidence, and suppression counts as forgetting.
+    #[test]
+    fn w20_optimizer_ignores_search_hits_and_counts_suppression_as_forgetting() {
+        let storage = create_test_storage();
+        let node = storage
+            .ingest(IngestInput {
+                content: "Memory with a long access history".to_string(),
+                node_type: "fact".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        let log = |access_type: &str, n: usize| {
+            let writer = storage.writer.lock().unwrap();
+            for i in 0..n {
+                let at = (Utc::now() - Duration::hours(i as i64)).to_rfc3339();
+                writer
+                    .execute(
+                        "INSERT INTO memory_access_log (node_id, access_type, accessed_at)
+                         VALUES (?1, ?2, ?3)",
+                        params![node.id, access_type, at],
+                    )
+                    .unwrap();
+            }
+        };
+
+        log("search_hit", 150);
+        assert!(
+            storage.optimize_w20_if_ready().unwrap().is_none(),
+            "search hits alone must not train the forgetting curve"
+        );
+
+        log("promote", 100);
+        log("suppress", 20);
+        let fitted = storage
+            .optimize_w20_if_ready()
+            .unwrap()
+            .expect("explicit feedback with forgetting evidence produces a fit");
+        assert!(fitted >= crate::fsrs::MIN_DECAY_BOUND, "fit {fitted} below the floor");
+        assert!(fitted < 1.0);
     }
 
     // ============== Spacing effect on access (v2.2.8) ==================

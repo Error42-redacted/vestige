@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Consolidation can no longer delete your memories
+
+The background consolidation cycle carried an autonomic "retention target"
+garbage collector (step 19): whenever average retention slipped below
+`VESTIGE_RETENTION_TARGET` (default 0.8) it hard-deleted every memory below
+0.3 retention older than 30 days — unattended, unreported in the output, and
+with no exemption for protected memories. The v2.2.4 audit gated the
+auto-dedup merge and missed this second path.
+
+It looked dormant only because decay was broken (next entry). Measured on
+this store on 2026-09-03: average retention 0.650, so the trigger was already
+armed; nothing below 0.3 yet, so it had never fired. Upstream lost 23 real
+memories the day their decay came back to life with this collector still in
+place. Ported from upstream v2.6.0 in the only safe order — collector first.
+
+- Step 19 is report-only: consolidation logs how many memories sit below 0.3
+  retention and records the average in `retention_snapshots`; it deletes
+  nothing. `VESTIGE_RETENTION_TARGET` gates nothing destructive (`health`
+  still reports whether the target is met).
+- `maintain {action:"gc"}` (dry-run by default) is the only collector. It now
+  refuses protected memories no matter how decayed, and every deletion goes
+  through `purge_node`, so a collected memory leaves a content-free deletion
+  tombstone naming the collector (`memory` get reports it as purged, not
+  "never existed") instead of vanishing by bulk `DELETE`.
+- CLI `consolidate` output reports Duplicates Merged.
+
+### Fixed — Forgetting works again (decay was dead)
+
+The FSRS-6 decay exponent (w20) is personalized by an optimizer trained on
+the access log. An agent memory store's log is success-dominated by
+construction — almost every event says "remembered" — so the best fit is
+"nothing is ever forgotten", and golden-section search rode w20 into the
+optimizer's 0.01 lower bound and stayed there. Measured on this store:
+w20 = 0.0104 on disk, all 860 memories compressed into 0.62–0.90 retention,
+memories untouched since February still at 0.63. Silent and Unavailable
+accessibility states could never fire; the four-state model ran as two.
+Ported from upstream v2.6.0, plus a repair path for stores already carrying
+the degenerate value.
+
+- The optimizer refuses to fit without real forgetting evidence (at least 5
+  failed-recall events); success-only history is insufficient evidence, not
+  proof of immortal memory.
+- The fit is floored at 0.08 (`fsrs::MIN_DECAY_BOUND`), roughly half the
+  FSRS-6 default; 0.01 was a numeric convenience, not a forgetting curve.
+- Training uses explicit feedback only (search hits are the memory being
+  shown, not a recall outcome) over the most recent 1,000 events, not the
+  oldest — the old ascending window slid under the 90-day log pruning.
+- Suppression counts as the forgetting signal it is; it was being fed to the
+  optimizer as a successful recall.
+- **Repair for existing stores:** a stored w20 below the floor is read as the
+  FSRS-6 default immediately, and the next consolidation rewrites the row —
+  decay is alive on the first cycle after upgrade, no manual step. Nothing is
+  deleted as a consequence (see above); memories nobody has touched for
+  months will sink into Dormant/Silent and rank accordingly.
+- The per-review sentiment boost is clamped to `MAX_STABILITY` (it compounded
+  unclamped; upstream measured stabilities up to 1.4e24 days) and
+  consolidation clamps existing outliers back, idempotently.
+
+
 ## [2.2.9] - 2026-08-07 — "Convergent Evolution"
 
 The upstream borrow wave: upstream v2.3.0's bugfix tier folded into the local

@@ -52,4 +52,4 @@ pub use scheduler::{
     FSRSParameters, FSRSScheduler, FSRSState, LearningState, PreviewResults, Rating, ReviewResult,
 };
 
-pub use optimizer::{FSRSOptimizer, ReviewLog};
+pub use optimizer::{FSRSOptimizer, ReviewLog, MIN_DECAY_BOUND, MIN_FORGETTING_EVIDENCE};
