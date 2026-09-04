@@ -104,6 +104,11 @@ pub const MIGRATIONS: &[Migration] = &[
         description: "Finish the V19 repair: clear connector sync cursors so the next source_sync re-scans from scratch and re-keys every clobbered record",
         up: MIGRATION_V20_UP,
     },
+    Migration {
+        version: 21,
+        description: "FTS5: replace the ascii tokenizer with unicode61 so typographic punctuation and accents stop swallowing adjacent words",
+        up: MIGRATION_V21_UP,
+    },
 ];
 
 /// A database migration
@@ -1190,6 +1195,63 @@ DELETE FROM connector_cursors;
 UPDATE schema_version SET version = 20, applied_at = datetime('now');
 "#;
 
+/// V21: FTS5 tokenizer fix (upstream v2.4.0's V30, renumbered for this
+/// lineage's ladder).
+///
+/// V7 built `knowledge_fts` with `tokenize='porter ascii'`. The `ascii`
+/// tokenizer only treats ASCII alphanumerics as token characters, and it does
+/// NOT treat multi-byte characters as separators — it folds them into the
+/// adjacent token. So an em dash, a curly apostrophe, an ellipsis, a
+/// non-breaking space, a leading emoji or an accented letter glues itself onto
+/// the neighbouring word, and that word becomes permanently unfindable by
+/// keyword search. LLM-authored memory text is saturated with exactly those
+/// characters (this store's memories are written with em dashes throughout),
+/// so a large fraction of stored content was invisible to the BM25 leg of
+/// hybrid search. Upstream measured 7% of a real store's memories carrying
+/// words hidden this way.
+///
+/// `unicode61` treats every non-alphanumeric codepoint as a separator and
+/// `remove_diacritics 2` folds accents, so "parser—which we fixed" tokenizes as
+/// parser/which/we/fixed and "café" matches "cafe". `porter` stemming is kept.
+///
+/// The query sanitizers in `crate::fts` are updated in the same change to split
+/// on Unicode alphanumerics rather than ASCII, because they deliberately mirror
+/// this tokenizer — changing either one alone breaks matching.
+const MIGRATION_V21_UP: &str = r#"
+DROP TRIGGER IF EXISTS knowledge_ai;
+DROP TRIGGER IF EXISTS knowledge_ad;
+DROP TRIGGER IF EXISTS knowledge_au;
+DROP TABLE IF EXISTS knowledge_fts;
+
+CREATE VIRTUAL TABLE knowledge_fts USING fts5(
+    id, content, tags,
+    content='knowledge_nodes',
+    content_rowid='rowid',
+    tokenize='porter unicode61 remove_diacritics 2'
+);
+
+INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild');
+
+CREATE TRIGGER knowledge_ai AFTER INSERT ON knowledge_nodes BEGIN
+    INSERT INTO knowledge_fts(rowid, id, content, tags)
+    VALUES (NEW.rowid, NEW.id, NEW.content, NEW.tags);
+END;
+
+CREATE TRIGGER knowledge_ad AFTER DELETE ON knowledge_nodes BEGIN
+    INSERT INTO knowledge_fts(knowledge_fts, rowid, id, content, tags)
+    VALUES ('delete', OLD.rowid, OLD.id, OLD.content, OLD.tags);
+END;
+
+CREATE TRIGGER knowledge_au AFTER UPDATE ON knowledge_nodes BEGIN
+    INSERT INTO knowledge_fts(knowledge_fts, rowid, id, content, tags)
+    VALUES ('delete', OLD.rowid, OLD.id, OLD.content, OLD.tags);
+    INSERT INTO knowledge_fts(rowid, id, content, tags)
+    VALUES (NEW.rowid, NEW.id, NEW.content, NEW.tags);
+END;
+
+UPDATE schema_version SET version = 21, applied_at = datetime('now');
+"#;
+
 /// Apply pending migrations
 ///
 /// Each migration is applied inside an explicit transaction so its schema
@@ -1721,8 +1783,8 @@ mod tests {
         seed_connector_cursor(&conn, "github", "octocat/repoB");
         assert_eq!(cursor_row_count(&conn), 2);
 
-        let applied = apply_migrations(&conn).expect("V20 applies on a V19 database");
-        assert_eq!(applied, 1, "exactly V20 should apply on a V19 database");
+        let applied = apply_migrations(&conn).expect("V20+ apply on a V19 database");
+        assert_eq!(applied, 2, "V20 and V21 should apply on a V19 database");
         assert_eq!(
             get_current_version(&conn).expect("version"),
             MIGRATIONS.last().unwrap().version
@@ -1734,18 +1796,64 @@ mod tests {
         );
     }
 
-    /// Fresh database: all migrations apply cleanly through V20 and the cursor
+    /// Fresh database: all migrations apply cleanly through V21 and the cursor
     /// table exists and is empty (nothing to clear, no error).
     #[test]
     fn v20_applies_cleanly_on_a_fresh_database() {
         let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
-        apply_migrations(&conn).expect("fresh migrations succeed through V20");
+        apply_migrations(&conn).expect("fresh migrations succeed through V21");
         assert_eq!(
             get_current_version(&conn).expect("version"),
-            20,
-            "latest migration must be V20"
+            21,
+            "latest migration must be V21"
         );
         assert_eq!(cursor_row_count(&conn), 0);
+    }
+
+    /// V21: the FTS index tokenizes on Unicode boundaries and folds
+    /// diacritics, so typographic punctuation no longer hides the word next
+    /// to it. Under the old `porter ascii` tokenizer "parser—which" was ONE
+    /// token and "café" indexed as "caf".
+    #[test]
+    fn v21_fts_tokenizer_is_unicode_aware() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
+        apply_migrations(&conn).expect("fresh migrations succeed through V21");
+        let tokenizer: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'knowledge_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fts table exists");
+        assert!(
+            tokenizer.contains("unicode61") && tokenizer.contains("remove_diacritics 2"),
+            "unexpected tokenizer clause: {tokenizer}"
+        );
+        // The external-content table can be exercised standalone: insert rows
+        // straight into the FTS index and query them.
+        conn.execute_batch(
+            "INSERT INTO knowledge_fts(rowid, id, content, tags)
+             VALUES (1, 'a', 'the parser—which we fixed—was slow', '[]');
+             INSERT INTO knowledge_fts(rowid, id, content, tags)
+             VALUES (2, 'b', 'Café au lait, naïve façade', '[]');
+             INSERT INTO knowledge_fts(rowid, id, content, tags)
+             VALUES (3, 'c', 'it can''t find the crate', '[]');",
+        )
+        .expect("seed fts rows");
+        let hits = |term: &str| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM knowledge_fts WHERE knowledge_fts MATCH ?1",
+                [term],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(hits("which"), 1, "em dash must separate tokens");
+        assert_eq!(hits("fixed"), 1);
+        assert_eq!(hits("cafe"), 1, "diacritics fold: cafe matches Café");
+        assert_eq!(hits("naive"), 1);
+        assert_eq!(hits("facade"), 1);
+        assert_eq!(hits("find"), 1, "curly/straight apostrophe separates tokens");
     }
 
     /// V20 is replayable: re-running it after new cursors were saved simply
