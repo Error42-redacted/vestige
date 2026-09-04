@@ -414,6 +414,15 @@ pub struct SqliteMemoryStore {
     embedding_service: EmbeddingService,
     #[cfg(feature = "vector-search")]
     vector_index: Option<Mutex<VectorIndex>>,
+    /// Last `PRAGMA data_version` observed on the reader connection.
+    ///
+    /// SQLite increments this on a connection whenever ANOTHER connection
+    /// commits to the database. It is the cheapest possible cross-process
+    /// change signal — no table scan, no file stat — and it is what lets a
+    /// long-lived process notice that a peer has written memories it has
+    /// never seen. See `refresh_vector_index_if_stale` (upstream #181).
+    #[cfg(feature = "vector-search")]
+    last_seen_data_version: Mutex<i64>,
     /// LRU cache for query embeddings to avoid re-embedding repeated queries
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
     query_cache: Option<Mutex<LruCache<String, Vec<f32>>>>,
@@ -655,6 +664,8 @@ impl SqliteMemoryStore {
             embedding_service,
             #[cfg(feature = "vector-search")]
             vector_index,
+            #[cfg(feature = "vector-search")]
+            last_seen_data_version: Mutex::new(-1),
             #[cfg(all(feature = "embeddings", feature = "vector-search"))]
             query_cache,
             registered_model: std::sync::RwLock::new(None),
@@ -3806,6 +3817,155 @@ impl SqliteMemoryStore {
 
     /// Semantic search returning scores
     #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    /// Bring the in-process vector index up to date with vectors written by
+    /// OTHER processes since this one last looked. (Upstream #181, adapted to
+    /// this lineage's `node_embeddings` table.)
+    ///
+    /// THE BUG THIS FIXES. The HNSW index is process-local: built once at
+    /// startup from `node_embeddings` and thereafter only ever appended to by
+    /// THIS process's own ingests. A second MCP server writing to the same
+    /// SQLite file is invisible to it — and this store is shared by Claude
+    /// Desktop, several Claude Code sessions and the CLI at once. Every
+    /// long-lived process is semantically blind to everything its peers have
+    /// written since it booted. The consequences are silent: the
+    /// prediction-error gate sees no similar candidate and creates a duplicate
+    /// instead of reinforcing, and recall returns an incomplete answer with no
+    /// indication anything is missing. The FTS5 leg reads SQLite directly and
+    /// is unaffected, which is exactly why the failure is partial and hard to
+    /// notice.
+    ///
+    /// THE SIGNAL. `PRAGMA data_version` is incremented on a connection
+    /// whenever a DIFFERENT connection commits. Reading it is a single pragma
+    /// with no table access, so this check is affordable on every query, and
+    /// when nothing has changed it costs one integer comparison. (This
+    /// process's own writer is a different connection from its reader, so own
+    /// writes trip it too; the id-only scan below keeps that cheap.)
+    ///
+    /// LOCK DISCIPLINE. Reader lock and index lock are taken SEQUENTIALLY and
+    /// never held together: read the version, drop; read ids, drop; take the
+    /// index to find what is missing, drop; read the missing blobs, drop; take
+    /// the index and add. `semantic_search_raw` holds only the index lock, so
+    /// no ordering cycle exists and this cannot deadlock against it.
+    ///
+    /// FAILS OPEN. A refresh problem must degrade to a possibly-stale index,
+    /// never break the query. Returns the number of vectors added.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    fn refresh_vector_index_if_stale(&self) -> usize {
+        let Some(index_mutex) = self.vector_index.as_ref() else {
+            return 0;
+        };
+
+        // --- reader lock: has any connection committed since we last looked? ---
+        let current_version: i64 = {
+            let Ok(reader) = self.reader.lock() else {
+                return 0;
+            };
+            match reader.query_row("PRAGMA data_version", [], |row| row.get(0)) {
+                Ok(v) => v,
+                Err(_) => return 0,
+            }
+        };
+        {
+            let Ok(mut seen) = self.last_seen_data_version.lock() else {
+                return 0;
+            };
+            if *seen == current_version {
+                return 0; // nothing has changed since we last looked
+            }
+            *seen = current_version;
+        }
+
+        let active_model = self.embedding_service.model_name();
+
+        // --- reader lock: which vectors exist (ids only, no blobs)? ---
+        let known: Vec<(String, String)> = {
+            let Ok(reader) = self.reader.lock() else {
+                return 0;
+            };
+            let Ok(mut stmt) = reader.prepare("SELECT node_id, model FROM node_embeddings") else {
+                return 0;
+            };
+            let Ok(mapped) = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            }) else {
+                return 0;
+            };
+            mapped.filter_map(|r| r.ok()).collect()
+        };
+
+        // --- index lock: which of those are we missing? ---
+        let missing: Vec<(String, String)> = {
+            let Ok(index) = index_mutex.lock() else {
+                return 0;
+            };
+            known
+                .into_iter()
+                .filter(|(node_id, model)| {
+                    !index.contains(node_id)
+                        && Self::embedding_model_matches_active(model, active_model)
+                })
+                .collect()
+        };
+        if missing.is_empty() {
+            return 0;
+        }
+
+        // --- reader lock: fetch only the missing blobs ---
+        let blobs: Vec<(String, Vec<u8>, String)> = {
+            let Ok(reader) = self.reader.lock() else {
+                return 0;
+            };
+            let Ok(mut stmt) =
+                reader.prepare("SELECT embedding FROM node_embeddings WHERE node_id = ?1")
+            else {
+                return 0;
+            };
+            missing
+                .into_iter()
+                .filter_map(|(node_id, model)| {
+                    stmt.query_row(params![node_id], |row| row.get::<_, Vec<u8>>(0))
+                        .ok()
+                        .map(|blob| (node_id, blob, model))
+                })
+                .collect()
+        };
+
+        // --- index lock: add, with the same decoding the startup loader uses ---
+        let Ok(mut index) = index_mutex.lock() else {
+            return 0;
+        };
+        let mut added = 0usize;
+        for (node_id, blob, model) in blobs {
+            if index.contains(&node_id) {
+                continue; // a concurrent own-ingest beat us to it
+            }
+            let Some(embedding) = Embedding::from_bytes(&blob) else {
+                continue; // unreadable vector: skip it, never fail the query
+            };
+            let vector = if embedding.dimensions != EMBEDDING_DIMENSIONS {
+                let model_lower = model.to_ascii_lowercase();
+                if model_lower.contains("nomic") || model_lower.contains("qwen3") {
+                    matryoshka_truncate(embedding.vector)
+                } else {
+                    continue; // unknown family: not ours to truncate into the index
+                }
+            } else {
+                embedding.vector
+            };
+            if index.add(&node_id, &vector).is_ok() {
+                added += 1;
+            }
+        }
+        if added > 0 {
+            tracing::debug!(
+                added,
+                data_version = current_version,
+                "refreshed vector index with memories written by another connection"
+            );
+        }
+        added
+    }
+
     fn semantic_search_raw(&self, query: &str, limit: i32) -> Result<Vec<(String, f32)>> {
         if !self.vector_search_available() {
             return Ok(vec![]);
@@ -3835,6 +3995,12 @@ impl SqliteMemoryStore {
             }
             _ => self.get_query_embedding(query)?,
         };
+
+        // Pick up anything a peer process wrote since we last searched (#181).
+        // Cheap when nothing changed: one PRAGMA and an integer comparison. Runs
+        // BEFORE the index lock is taken, and takes its own locks sequentially,
+        // so it cannot deadlock against the search below.
+        self.refresh_vector_index_if_stale();
 
         let index = self.vector_index.as_ref().unwrap();
         let index = index
@@ -16031,6 +16197,49 @@ mod tests {
             .expect("explicit feedback with forgetting evidence produces a fit");
         assert!(fitted >= crate::fsrs::MIN_DECAY_BOUND, "fit {fitted} below the floor");
         assert!(fitted < 1.0);
+    }
+
+    // ============== Peer-process vector index refresh (#181, v2.2.10) ==========
+
+    /// A second store handle on the same database file (a peer process) must
+    /// see vectors the first one wrote AFTER the second was opened. The
+    /// startup loader alone cannot: the index is process-local.
+    #[cfg(all(feature = "embeddings", feature = "vector-search"))]
+    #[test]
+    fn peer_process_vectors_are_picked_up_by_the_index_refresh() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let writer_store = create_test_storage_at(&dir, "peer.db");
+        let reader_store = create_test_storage_at(&dir, "peer.db");
+        if reader_store.vector_index.is_none() {
+            eprintln!("vector index unavailable on this machine; refresh test skipped");
+            return;
+        }
+
+        // Drain the reader's initial version delta so the assertion below is
+        // about the peer write, not about the connection setup.
+        reader_store.refresh_vector_index_if_stale();
+
+        let v = vec![0.25_f32; EMBEDDING_DIMENSIONS];
+        let id = ingest_with_embedding(
+            &writer_store,
+            "written by a peer process after the reader booted",
+            "fact",
+            &v,
+        );
+        {
+            let index = reader_store.vector_index.as_ref().unwrap().lock().unwrap();
+            assert!(!index.contains(&id), "index is process-local: not visible before refresh");
+        }
+
+        let added = reader_store.refresh_vector_index_if_stale();
+        assert_eq!(added, 1, "the peer's vector is added on refresh");
+        {
+            let index = reader_store.vector_index.as_ref().unwrap().lock().unwrap();
+            assert!(index.contains(&id));
+        }
+
+        // Nothing changed since: the check is a no-op.
+        assert_eq!(reader_store.refresh_vector_index_if_stale(), 0);
     }
 
     // ============== Spacing effect on access (v2.2.8) ==================
