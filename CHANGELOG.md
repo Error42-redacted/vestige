@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.10] - 2026-09-03 — "Graceful Forgetting"
+
+The forgetting release. Decay had been dead on this store for months and an
+autonomic collector sat armed behind it; both are fixed, in the only safe
+order, and nothing in the consolidation cycle can delete a memory any more.
+The rest is upstream v2.4.0–v2.6.1's correctness tier, taken selectively
+(declined features — VestigeOS/Observatory, share loop, receipts/spacetime,
+Memory PR write gate, cloud sync, embedding profiles — stay out).
+
 ### Fixed — Consolidation can no longer delete your memories
 
 The background consolidation cycle carried an autonomic "retention target"
@@ -65,6 +74,70 @@ the degenerate value.
   unclamped; upstream measured stabilities up to 1.4e24 days) and
   consolidation clamps existing outliers back, idempotently.
 
+
+### Fixed — Corrections, inhibitions and exact lookups keep their word (upstream v2.4.0)
+
+- `demote` and `suppress` no longer stamp `last_accessed`. Decay recomputes
+  retention from days-since-last-access, so an inhibited memory looked
+  freshly recalled and the next consolidation silently undid the penalty.
+  An inhibition is not a recall.
+- A correction is no longer swallowed as a reinforcement. "Never use X"
+  against a stored "Always use X" sits above the near-identical threshold,
+  and the gate reinforced the memory the user had just said was wrong. The
+  short-circuit now honours the contradiction detector and falls through to
+  the correction path (consent-gated as before).
+- `recall(mode="reason")`: supersession requires the newer memory to also be
+  the more trusted one; it used to report the less-trusted memory as
+  superseding the more-trusted one. The claim-vs-memory conflict check gates
+  on query coverage (0.5) instead of a symmetric Jaccard that no realistic
+  memory length could reach, so it actually fires now.
+- Exact lookup (UUID, env var, path, quoted phrase): the keyword leg is
+  normalized below the literal-match floor, so a memory that merely cites
+  an identifier can no longer outrank the memory that is the identifier.
+- Backfill's causal join only accepts identifier-shaped entities. Topical
+  tags ("vestige" is on most of this store's memories) and shouted emphasis
+  (DONE, NEXT, GREEN) stop forging causal links; env-var-shaped tokens need
+  a separator or digit, paths need a real segment on both sides, and bare
+  acronyms are dropped with the rest.
+
+### Fixed — Keyword search is unicode-aware (migration V21)
+
+- `knowledge_fts` is rebuilt with `porter unicode61 remove_diacritics 2`.
+  The old `ascii` tokenizer folded an em dash, curly apostrophe, ellipsis,
+  non-breaking space or accented letter into the neighbouring word, which
+  then became unfindable by keyword search. This store's memories are
+  written with em dashes throughout. Upstream measured 7% of a real store
+  hidden this way.
+- The query sanitizers mirror the tokenizer: an allow list (blank every
+  non-alphanumeric) replaces a deny list that missed the apostrophe, which
+  opens an FTS5 string literal — `recall("cargo can't find crate")`
+  returned nothing. Accented tokens survive.
+- The index is rebuilt once by the migration at first start.
+
+### Fixed — Vestige sees writes from your other sessions (upstream #181)
+
+The vector index was process-local: Claude Desktop, each Claude Code
+session and the CLI all share one store, and each long-lived process was
+semantically blind to everything its peers wrote after it booted — duplicate
+creation instead of reinforcement, incomplete recall with no sign anything
+was missing. Semantic search now checks `PRAGMA data_version` (one pragma
+when nothing changed) and loads only the vectors it is missing.
+
+### Added — `state` node type that expires by default (upstream v2.6.1)
+
+"Current state" memories (version numbers, deploy-pending notes, progress,
+inventories) stay true in the store long after they stopped being true in
+the world. `smart_ingest` accepts `node_type: "state"`, which sets
+`validUntil` to `VESTIGE_STATE_TTL_DAYS` (default 30, `0` disables) after
+ingest and reports it in the response. Recall down-ranks any expired or
+not-yet-valid memory to the bottom (x0.1) and reports `currentlyValid`
+alongside the existing validity fields; the memory stays retrievable for
+audit. Consent-superseded losers now sink the same way.
+
+### Changed — dependencies
+
+- rusqlite 0.38 → 0.40 (bundled SQLite 3.53.x), covering CVE-2026-11822,
+  a memory-corruption bug in FTS5.
 
 ## [2.2.9] - 2026-08-07 — "Convergent Evolution"
 
